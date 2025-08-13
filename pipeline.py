@@ -37,6 +37,7 @@ def train_model(
     model = model.to(device)
     model.train()
     
+    # use cosine annealing learning rate scheduler
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     criterion = nn.CrossEntropyLoss(ignore_index=train_loader.dataset.tokenizer.pad_token_id)  # Ignore padding tokens
     
@@ -66,6 +67,10 @@ def train_model(
                 
                 # Backward pass
                 loss.backward()
+
+                # Clip gradients to avoid exploding gradients
+                torch.nn.utils.clip_grad_norm(model.parameters(), max_norm=1.0)
+
                 optimizer.step()
                 
                 batch_loss += loss.item()
@@ -164,6 +169,10 @@ def train_optimised_model(
                 
             # Backward pass
             loss.backward()
+
+            # Clip gradients to avoid exploding gradients
+            torch.nn.utils.clip_grad_norm(model.parameters(), max_norm=1.0) 
+
             optimizer.step()
             
             batch_loss += loss.item()
@@ -263,7 +272,9 @@ def evaluate_model(model: nn.Module, validation_loader: DataLoader, device: str 
             
             # Compute loss
             loss = criterion(logits_flat, labels_flat)
-            total_loss += loss.item()
+
+            avg_batch_loss = loss.item() / batch_size
+            total_loss += avg_batch_loss
             num_batches += 1
     
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
@@ -311,10 +322,10 @@ def load_best_model(save_path: str, model_class, device: str = 'cpu'):
 
 def main():
     parser = argparse.ArgumentParser(description='Train SimpleRNN language model on BSD dataset')
-    parser.add_argument('--hidden_dim', type=int, default=512, help='Hidden dimension')
+    parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension')
     parser.add_argument('--key_dim', type=int, default=128, help='Key dimension')
-    parser.add_argument('--value_dim', type=int, default=256, help='Value dimension')
-    parser.add_argument('--output_dim', type=int, default=256, help='Output dimension')
+    parser.add_argument('--value_dim', type=int, default=128, help='Value dimension')
+    parser.add_argument('--output_dim', type=int, default=128, help='Output dimension')
     parser.add_argument('--num_layers', type=int, default=2, help='Number of RNN layers')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--num_epochs', type=int, default=30, help='Number of training epochs')
@@ -369,13 +380,17 @@ def main():
         train_ds, 
         batch_size=args.batch_size, 
         shuffle=True,
-        collate_fn=lambda batch: collate_fn(batch, tokenizer)
+        collate_fn=lambda batch: collate_fn(batch, tokenizer),
+        pin_memory=True,
+        num_workers=4
     )
     validation_ds = BSDTextDataset(ds['validation'], tokenizer, max_length=args.max_length)
     validation_loader = DataLoader(
         validation_ds, 
         batch_size=args.batch_size,
-        collate_fn=lambda batch: collate_fn(batch, tokenizer)
+        collate_fn=lambda batch: collate_fn(batch, tokenizer),
+        pin_memory=True,
+        num_workers=4
     )
     
     # Train model
