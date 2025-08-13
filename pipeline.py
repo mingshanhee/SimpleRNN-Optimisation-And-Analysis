@@ -20,7 +20,7 @@ from simple_rnn import LM as SimpleLM
 from transformers import AutoTokenizer
 from datasets import load_dataset
 
-from tokenizers_utils import load_fast_tokenizer
+from tokenizers_utils import load_fast_tokenizer, EN_TOKEN, JA_TOKEN
 
 
 class BSDTextDataset(Dataset):
@@ -35,34 +35,43 @@ class BSDTextDataset(Dataset):
         return len(self.ds)
     
     def __getitem__(self, idx):
+        """Create joint sequence  <en> EN ids <ja> JA ids </s>  for Prefix-LM."""
         en = self.ds[idx]["en_sentence"]
         ja = self.ds[idx]["ja_sentence"]
 
-        # Tokenize and truncate/pad
-        en_tokens = self.tokenizer(
-            en,
-            max_length=self.max_length,
-            truncation=True,
-            padding='max_length',
-            return_tensors='pt'
-        )
+        src_ids = self.tokenizer.encode(en, add_special_tokens=False)
+        tgt_ids = self.tokenizer.encode(ja, add_special_tokens=False)
 
-        ja_tokens = self.tokenizer(
-            ja,
-            max_length=self.max_length,
-            truncation=True,
-            padding='max_length',
-            return_tensors='pt'
-        )
+        src_bos = self.tokenizer.convert_tokens_to_ids(EN_TOKEN)
+        tgt_bos = self.tokenizer.convert_tokens_to_ids(JA_TOKEN)
 
-        en_ids = en_tokens['input_ids'].squeeze(0)  # Remove batch dimension
-        ja_ids = ja_tokens['input_ids'].squeeze(0)  # Remove batch dimension
+        input_ids = [src_bos] + src_ids + [tgt_bos] + tgt_ids + [
+            self.tokenizer.eos_token_id
+        ]
 
-        # For language modeling, input and target are shifted by one position
-        return {
-            'input_ids': en_ids,  # All tokens except last
-            'labels': ja_ids       # All tokens except first
-        }
+        trans_pos = input_ids.index(tgt_bos) + 1
+        labels = [self.tokenizer.pad_token_id] * trans_pos + input_ids[trans_pos:]
+
+        return {"input_ids": input_ids, "labels": labels}
+
+def collate_fn(batch, tokenizer):
+    """Custom collate function to pad sequences to equal length."""
+    # Extract input_ids and labels from batch
+    input_ids = [torch.tensor(item['input_ids']) for item in batch]
+    labels = [torch.tensor(item['labels']) for item in batch]
+    
+    # Pad sequences to the same length
+    input_ids_padded = torch.nn.utils.rnn.pad_sequence(
+        input_ids, batch_first=True, padding_value=tokenizer.pad_token_id
+    )
+    labels_padded = torch.nn.utils.rnn.pad_sequence(
+        labels, batch_first=True, padding_value=tokenizer.pad_token_id
+    )
+    
+    return {
+        'input_ids': input_ids_padded,
+        'labels': labels_padded
+    }
 
 def train_model(
     model: nn.Module,
@@ -78,7 +87,7 @@ def train_model(
     model.train()
     
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
+    criterion = nn.CrossEntropyLoss(ignore_index=train_loader.dataset.tokenizer.pad_token_id)  # Ignore padding tokens
     
     for epoch in range(num_epochs):
         total_loss = 0.0
@@ -123,6 +132,7 @@ def train_model(
 def train_optimised_model(
     model: nn.Module,
     train_loader: DataLoader,
+    validation_loader: DataLoader = None,
     num_epochs: int = 5,
     learning_rate: float = 1e-3,
     device: str = 'cpu'
@@ -134,7 +144,7 @@ def train_optimised_model(
     model.train()
     
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding tokens
+    criterion = nn.CrossEntropyLoss(ignore_index=train_loader.dataset.tokenizer.pad_token_id)  # Ignore padding tokens
     
     for epoch in range(num_epochs):
         total_loss = 0.0
@@ -157,8 +167,6 @@ def train_optimised_model(
             logits = model(input_ids)  # (batch_size, seq_len, vocab_size)
             
             # Reshape for CrossEntropyLoss
-            # CrossEntropyLoss expects: input (N, C), target (N)
-            # where N = batch_size * seq_len, C = vocab_size
             batch_size, seq_len, vocab_size = logits.shape
             logits_flat = logits.view(-1, vocab_size)  # (batch_size * seq_len, vocab_size)
             labels_flat = labels.view(-1)  # (batch_size * seq_len,)
@@ -179,7 +187,43 @@ def train_optimised_model(
             progress_bar.set_postfix({'loss': f'{avg_batch_loss:.4f}'})
         
         avg_epoch_loss = total_loss / num_batches
-        print(f"Epoch {epoch+1} - Average Loss: {avg_epoch_loss:.4f}")
+        
+        # Evaluate on validation set if provided
+        if validation_loader is not None:
+            val_loss = evaluate_model(model, validation_loader, device)
+            print(f"Epoch {epoch+1} - Train Loss: {avg_epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
+            model.train()  # Set back to training mode
+        else:
+            print(f"Epoch {epoch+1} - Train Loss: {avg_epoch_loss:.4f}")
+
+def evaluate_model(model: nn.Module, validation_loader: DataLoader, device: str = 'cpu'):
+    """Evaluate the model on validation data."""
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+    
+    criterion = nn.CrossEntropyLoss(ignore_index=validation_loader.dataset.tokenizer.pad_token_id)
+    
+    with torch.no_grad():
+        for batch in validation_loader:
+            input_ids = batch['input_ids'].to(device)
+            labels = batch['labels'].to(device)
+            
+            # Get predictions
+            logits = model(input_ids)  # (batch_size, seq_len, vocab_size)
+            
+            # Reshape for CrossEntropyLoss
+            batch_size, seq_len, vocab_size = logits.shape
+            logits_flat = logits.view(-1, vocab_size)
+            labels_flat = labels.view(-1)
+            
+            # Compute loss
+            loss = criterion(logits_flat, labels_flat)
+            total_loss += loss.item()
+            num_batches += 1
+    
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+    return avg_loss
 
 def main():
     parser = argparse.ArgumentParser(description='Train SimpleRNN language model on BSD dataset')
@@ -218,20 +262,7 @@ def main():
         print(f"Error loading tokenizer: {e}")
         print("Building tokenizer from scratch...")
         tokenizer = load_fast_tokenizer(ds, "tokenizers/bsd_ja_en_bpe-tokenizer.json")
-    
-    # Create dataset and dataloader
-    train_ds = BSDTextDataset(ds['train'], tokenizer, max_length=args.max_length)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
 
-    for i, batch in enumerate(train_loader):
-        print(f"Batch {i+1}/{len(train_loader)}:")
-        print(f"  Input IDs shape: {batch['input_ids'].shape}")
-        print(f"  Labels shape: {batch['labels'].shape}")
-        print(f"  Sample input_ids: {batch['input_ids'][0][:10]}...")  # First 10 tokens of first sample
-        
-        if i >= 0:  # Only show first 3 batches
-            break
-    
     # Initialize model
     model = ModifiedLM(
         vocab_size=len(tokenizer),
@@ -241,15 +272,29 @@ def main():
         output_dim=args.output_dim,
         num_layers=args.num_layers
     )
-    
+
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"Tokenizer vocab size: {len(tokenizer)}")
-    print(f"Model vocab size: {model.vocab_size}")
+    
+    # Create dataset and dataloader
+    train_ds = BSDTextDataset(ds['train'], tokenizer, max_length=args.max_length)
+    train_loader = DataLoader(
+        train_ds, 
+        batch_size=args.batch_size, 
+        shuffle=True,
+        collate_fn=lambda batch: collate_fn(batch, tokenizer)
+    )
+    validation_ds = BSDTextDataset(ds['validation'], tokenizer, max_length=args.max_length)
+    validation_loader = DataLoader(
+        validation_ds, 
+        batch_size=args.batch_size,
+        collate_fn=lambda batch: collate_fn(batch, tokenizer)
+    )
     
     # Train model
     train_optimised_model(
         model=model,
         train_loader=train_loader,
+        validation_loader=validation_loader,
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
         device=device
