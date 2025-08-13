@@ -93,7 +93,14 @@ class SimpleRNN(nn.Module):
 
 class LM(nn.Module):
     def __init__(
-        self, vocab_size: int, hidden_dim: int, key_dim: int, value_dim: int, output_dim: int, num_layers: int,
+        self, 
+        vocab_size: int, 
+        hidden_dim: int, 
+        key_dim: int, 
+        value_dim: int, 
+        output_dim: int, 
+        num_layers: int,
+        fused_projection: bool = True,
         use_gradient_checkpointing: bool = False
     ):
         super().__init__()
@@ -109,15 +116,18 @@ class LM(nn.Module):
         self.embedding = nn.Embedding(vocab_size, hidden_dim)
 
         # Stack of SimpleRNN layers
-        self.layers = nn.ModuleList([SimpleRNN(hidden_dim, key_dim, value_dim, output_dim) for _ in range(num_layers)])
+        self.layers = nn.ModuleList([
+            SimpleRNN(hidden_dim, key_dim, value_dim, output_dim, fused_projection) 
+            for _ in range(num_layers)
+        ])
 
         # Final output projection after reduction
-        self.lm_head = nn.Linear(output_dim, vocab_size)  # Output logits for the vocab_size
+        self.lm_head = nn.Linear(output_dim, vocab_size, bias=False)  # Output logits for the vocab_size
 
-    def _forward_layer(self, layer, hidden_state):
-        """Helper function for gradient checkpointing"""
-        output, _ = layer(hidden_state)
-        return output
+        self.lm_head.weight = self.embedding.weight
+
+    def _forward_layer(self, layer, hidden_state, cell_state):
+        return layer(hidden_state, cell_state)
 
     def forward(
             self, 
@@ -135,7 +145,10 @@ class LM(nn.Module):
         hidden_state = self.embedding(input_ids)  # (B, T, hidden_dim)
 
         for layer in self.layers:
-            hidden_state, cell_state = layer(hidden_state, cell_state)  # Pass through each SimpleRNN layer
+            if self.use_gradient_checkpointing and self.training:
+                hidden_state, cell_state = checkpoint(self._forward_layer, layer, hidden_state, cell_state)
+            else:
+                hidden_state, cell_state = layer(hidden_state, cell_state)  # Pass through each SimpleRNN layer
 
         output = self.lm_head(hidden_state)  # (B, T, vocab_size)
 
