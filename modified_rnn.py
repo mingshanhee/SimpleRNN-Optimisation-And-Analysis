@@ -1,26 +1,43 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Tuple
+from typing import Optional, Tuple
 
 # Add gradient checkpointing
 from torch.utils.checkpoint import checkpoint
 
 class SimpleRNN(nn.Module):
-    def __init__(self, hidden_dim: int, key_dim: int, value_dim: int, output_dim: int):
+    def __init__(
+            self, 
+            hidden_dim: int, 
+            key_dim: int, 
+            value_dim: int, 
+            output_dim: int,
+            fused_projection: bool = True
+        ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.key_dim = key_dim
         self.value_dim = value_dim
         self.output_dim = output_dim
+        self.fused_projection = fused_projection
 
-        self.query_proj = nn.Linear(hidden_dim, key_dim)  # query projection
-        self.key_proj = nn.Linear(hidden_dim, key_dim)  # key projection
-        self.value_proj = nn.Linear(hidden_dim, value_dim)  # value projection
-        self.gate_proj = nn.Linear(hidden_dim, key_dim)  # gate projection
+        if fused_projection:
+            # Single projection layer for all components
+            self.proj = nn.Linear(hidden_dim, 3 * key_dim + value_dim)
+        else:
+            # Separate projection layers for each component
+            self.query_proj = nn.Linear(hidden_dim, key_dim)  # query projection
+            self.key_proj = nn.Linear(hidden_dim, key_dim)  # key projection
+            self.value_proj = nn.Linear(hidden_dim, value_dim)  # value projection
+            self.gate_proj = nn.Linear(hidden_dim, key_dim)  # gate projection
+
         self.out_proj = nn.Linear(value_dim, output_dim)  # output projection
 
-    def forward(self, hidden_state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+            self, 
+            hidden_state: torch.Tensor,
+            cell_state: Optional[torch.Tensor] = None
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             hidden_state: Tensor of shape (B, T, hidden_dim)
@@ -34,37 +51,45 @@ class SimpleRNN(nn.Module):
         dtype = hidden_state.dtype
         device = hidden_state.device
 
-        # Initialize state for all batches
-        state = torch.zeros(B, K, V, dtype=dtype, device=device)  # (B, K, V)
-        output_list = []  # Use list to avoid pre-allocating large tensor
-
+        # Initialize cell state if not provided
+        if cell_state is None:
+            cell_state = torch.zeros(B, K, V, dtype=dtype, device=device)  # (B, K, V)
+        
+        # Use list to avoid pre-allocating large tensor
+        outputs = torch.empty(B, T, self.value_dim, dtype=dtype, device=device)
         
         # Process sequence step by step to reduce memory usage
         for i in range(T):
             # Compute projections for current timestep
             h_i = hidden_state[:, i, :]  # (B, hidden_dim)
             
-            query_i = self.query_proj(h_i)  # (B, key_dim)
-            key_i = torch.sigmoid(self.key_proj(h_i))  # (B, key_dim)
-            gate_i = torch.sigmoid(self.gate_proj(h_i))  # (B, key_dim)
-            value_i = self.value_proj(h_i)  # (B, value_dim)
+            if self.fused_projection:
+                # Single projection for all components
+                qkgv = self.proj(h_i)
+                query_i, key_i, gate_i, value_i = torch.split(qkgv, [K, K, K, V], dim=-1)
+                key_i  = torch.sigmoid(key_i)
+                gate_i = torch.sigmoid(gate_i)
+            else:
+                query_i = self.query_proj(h_i)  # (B, key_dim)
+                key_i = torch.sigmoid(self.key_proj(h_i))  # (B, key_dim)
+                gate_i = torch.sigmoid(self.gate_proj(h_i))  # (B, key_dim)
+                value_i = self.value_proj(h_i)  # (B, value_dim)
 
             # Compute key-value update - batch matrix multiplication
             key_value_i = torch.bmm(key_i.unsqueeze(-1), value_i.unsqueeze(1))  # (B, key_dim, value_dim)
             
-            # Update state (non-in-place to avoid gradient issues)
-            state = state * gate_i.unsqueeze(-1)  # Non-in-place multiplication with broadcasting
-            state = state + key_value_i  # Non-in-place addition
+            # Update cell_state (non-in-place to avoid gradient issues)
+            cell_state = cell_state * gate_i.unsqueeze(-1)  
+            cell_state = cell_state + key_value_i 
             
             # Compute output for current timestep - batch matrix multiplication
-            output_i = torch.bmm(state.transpose(-2, -1), query_i.unsqueeze(-1)).squeeze(-1)  # (B, value_dim)
-            output_list.append(output_i)
+            output_i = torch.bmm(cell_state.transpose(-2, -1), query_i.unsqueeze(-1)).squeeze(-1)  # (B, value_dim)
+            outputs[:, i, :] = output_i
 
         # Stack outputs at the end
-        output = torch.stack(output_list, dim=1)  # (B, T, value_dim)
-        output = self.out_proj(output)  # (B, T, output_dim)
+        outputs = self.out_proj(outputs)  # (B, T, output_dim)
             
-        return output, state
+        return outputs, cell_state
 
 class LM(nn.Module):
     def __init__(
@@ -94,7 +119,11 @@ class LM(nn.Module):
         output, _ = layer(hidden_state)
         return output
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+            self, 
+            input_ids: torch.Tensor,
+            cell_state: Optional[torch.Tensor] = None
+        ) -> list[torch.Tensor, torch.Tensor]:
         """
         Args:
             input_ids: Tensor of shape (B, T) containing token indices
@@ -106,15 +135,11 @@ class LM(nn.Module):
         hidden_state = self.embedding(input_ids)  # (B, T, hidden_dim)
 
         for layer in self.layers:
-            if self.use_gradient_checkpointing and self.training:
-                # Use gradient checkpointing to trade compute for memory during training
-                hidden_state = checkpoint(self._forward_layer, layer, hidden_state, use_reentrant=False)
-            else:
-                hidden_state, _ = layer(hidden_state)  # Pass through each SimpleRNN layer
+            hidden_state, cell_state = layer(hidden_state, cell_state)  # Pass through each SimpleRNN layer
 
         output = self.lm_head(hidden_state)  # (B, T, vocab_size)
 
-        return output
+        return output, cell_state
 
 
 def main():
