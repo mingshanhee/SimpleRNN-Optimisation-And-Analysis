@@ -13,6 +13,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from datasets import load_dataset
 from tqdm import tqdm
+import wandb
 
 from modified_rnn import LM as ModifiedLM
 from simple_rnn import LM as SimpleLM
@@ -21,57 +22,7 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 
 from tokenizers_utils import load_fast_tokenizer, EN_TOKEN, JA_TOKEN
-
-
-class BSDTextDataset(Dataset):
-    """Dataset wrapper for BSD Japanese-English corpus."""
-    
-    def __init__(self, ds_split, tokenizer = None, max_length: int = 512):
-        self.ds = ds_split
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        
-    def __len__(self):
-        return len(self.ds)
-    
-    def __getitem__(self, idx):
-        """Create joint sequence  <en> EN ids <ja> JA ids </s>  for Prefix-LM."""
-        en = self.ds[idx]["en_sentence"]
-        ja = self.ds[idx]["ja_sentence"]
-
-        src_ids = self.tokenizer.encode(en, add_special_tokens=False)
-        tgt_ids = self.tokenizer.encode(ja, add_special_tokens=False)
-
-        src_bos = self.tokenizer.convert_tokens_to_ids(EN_TOKEN)
-        tgt_bos = self.tokenizer.convert_tokens_to_ids(JA_TOKEN)
-
-        input_ids = [src_bos] + src_ids + [tgt_bos] + tgt_ids + [
-            self.tokenizer.eos_token_id
-        ]
-
-        trans_pos = input_ids.index(tgt_bos) + 1
-        labels = [self.tokenizer.pad_token_id] * trans_pos + input_ids[trans_pos:]
-
-        return {"input_ids": input_ids, "labels": labels}
-
-def collate_fn(batch, tokenizer):
-    """Custom collate function to pad sequences to equal length."""
-    # Extract input_ids and labels from batch
-    input_ids = [torch.tensor(item['input_ids']) for item in batch]
-    labels = [torch.tensor(item['labels']) for item in batch]
-    
-    # Pad sequences to the same length
-    input_ids_padded = torch.nn.utils.rnn.pad_sequence(
-        input_ids, batch_first=True, padding_value=tokenizer.pad_token_id
-    )
-    labels_padded = torch.nn.utils.rnn.pad_sequence(
-        labels, batch_first=True, padding_value=tokenizer.pad_token_id
-    )
-    
-    return {
-        'input_ids': input_ids_padded,
-        'labels': labels_padded
-    }
+from data import BSDTextDataset, collate_fn
 
 def train_model(
     model: nn.Module,
@@ -135,10 +86,35 @@ def train_optimised_model(
     validation_loader: DataLoader = None,
     num_epochs: int = 5,
     learning_rate: float = 1e-3,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    save_path: str = 'best_model.pt',
+    tokenizer = None,
+    args = None,
+    use_wandb: bool = False,
+    wandb_project: str = 'simple-rnn'
 ):
-    """Train the language model."""
+    """Train the language model and save the best model based on validation loss."""
     print(f"Training on device: {device}")
+    
+    # Initialize wandb if requested
+    if use_wandb:
+        wandb.init(
+            project=wandb_project,
+            config={
+                'hidden_dim': args.hidden_dim if args else None,
+                'key_dim': args.key_dim if args else None,
+                'value_dim': args.value_dim if args else None,
+                'output_dim': args.output_dim if args else None,
+                'num_layers': args.num_layers if args else None,
+                'batch_size': args.batch_size if args else None,
+                'learning_rate': learning_rate,
+                'num_epochs': num_epochs,
+                'vocab_size': len(tokenizer) if tokenizer else None,
+                'device': device
+            }
+        )
+        # Watch the model to track gradients and parameters
+        wandb.watch(model, log='all', log_freq=100)
     
     model = model.to(device)
     model.train()
@@ -146,9 +122,16 @@ def train_optimised_model(
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     criterion = nn.CrossEntropyLoss(ignore_index=train_loader.dataset.tokenizer.pad_token_id)  # Ignore padding tokens
     
+    # Track best validation loss and early stopping
+    best_val_loss = float('inf')
+    best_epoch = 0
+    patience = 5
+    patience_counter = 0
+    
     for epoch in range(num_epochs):
         total_loss = 0.0
         num_batches = 0
+        printed = False
         
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
         
@@ -164,12 +147,17 @@ def train_optimised_model(
             optimizer.zero_grad()
             
             # Get predictions for this sequence
-            logits = model(input_ids)  # (batch_size, seq_len, vocab_size)
+            logits, _ = model(input_ids)  # (batch_size, seq_len, vocab_size)
             
             # Reshape for CrossEntropyLoss
             batch_size, seq_len, vocab_size = logits.shape
-            logits_flat = logits.view(-1, vocab_size)  # (batch_size * seq_len, vocab_size)
-            labels_flat = labels.view(-1)  # (batch_size * seq_len,)
+            # Shift logits and labels for next-token prediction
+            # logits[:-1] predicts labels[1:]
+            logits_shifted = logits[:, :-1, :].contiguous()  # (batch_size, seq_len-1, vocab_size)
+            labels_shifted = labels[:, 1:].contiguous()  # (batch_size, seq_len-1)
+            
+            logits_flat = logits_shifted.view(-1, vocab_size)  # (batch_size * (seq_len-1), vocab_size)
+            labels_flat = labels_shifted.view(-1)  # (batch_size * (seq_len-1),)
             
             # Compute loss
             loss = criterion(logits_flat, labels_flat)
@@ -189,12 +177,63 @@ def train_optimised_model(
         avg_epoch_loss = total_loss / num_batches
         
         # Evaluate on validation set if provided
-        if validation_loader is not None:
-            val_loss = evaluate_model(model, validation_loader, device)
-            print(f"Epoch {epoch+1} - Train Loss: {avg_epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
-            model.train()  # Set back to training mode
+        val_loss = evaluate_model(model, validation_loader, device)
+        print(f"Epoch {epoch+1} - Train Loss: {avg_epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
+        
+        # Log to wandb if enabled
+        if use_wandb:
+            wandb.log({
+                'epoch': epoch + 1,
+                'train_loss': avg_epoch_loss,
+                'val_loss': val_loss
+            })
+        
+        # Save best model based on validation loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch + 1
+            patience_counter = 0  # Reset patience counter
+            
+            # Save the best model
+            checkpoint = {
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': epoch + 1,
+                'train_loss': avg_epoch_loss,
+                'val_loss': val_loss,
+                'best_val_loss': best_val_loss,
+                'args': args
+            }
+            
+            if tokenizer is not None:
+                checkpoint['tokenizer'] = tokenizer
+            
+            torch.save(checkpoint, save_path)
+            print(f"New best model saved! Val Loss: {val_loss:.4f} -> {save_path}")
+            
+            # Log best validation loss to wandb
+            if use_wandb:
+                wandb.log({
+                    'best_val_loss': best_val_loss,
+                    'best_epoch': best_epoch
+                })
         else:
-            print(f"Epoch {epoch+1} - Train Loss: {avg_epoch_loss:.4f}")
+            # Increment patience counter if validation loss didn't improve
+            patience_counter += 1
+            print(f"Validation loss didn't improve. Patience: {patience_counter}/{patience}")
+            
+            # Early stopping check
+            if patience_counter >= patience:
+                print(f"Early stopping triggered! No improvement for {patience} epochs.")
+                print(f"Best validation loss: {best_val_loss:.4f} (Epoch {best_epoch})")
+                break
+        
+        model.train()  # Set back to training mode
+    
+    # Print summary
+    print(f"\nTraining completed!")
+    print(f"Best validation loss: {best_val_loss:.4f} (Epoch {best_epoch})")
+    print(f"Best model saved to: {save_path}")
 
 def evaluate_model(model: nn.Module, validation_loader: DataLoader, device: str = 'cpu'):
     """Evaluate the model on validation data."""
@@ -210,12 +249,17 @@ def evaluate_model(model: nn.Module, validation_loader: DataLoader, device: str 
             labels = batch['labels'].to(device)
             
             # Get predictions
-            logits = model(input_ids)  # (batch_size, seq_len, vocab_size)
+            logits, _ = model(input_ids)  # (batch_size, seq_len, vocab_size)
             
             # Reshape for CrossEntropyLoss
             batch_size, seq_len, vocab_size = logits.shape
-            logits_flat = logits.view(-1, vocab_size)
-            labels_flat = labels.view(-1)
+            # Shift logits and labels for next-token prediction
+            # logits[:-1] predicts labels[1:]
+            logits_shifted = logits[:, :-1, :].contiguous()  # (batch_size, seq_len-1, vocab_size)
+            labels_shifted = labels[:, 1:].contiguous()  # (batch_size, seq_len-1)
+            
+            logits_flat = logits_shifted.view(-1, vocab_size)
+            labels_flat = labels_shifted.view(-1)
             
             # Compute loss
             loss = criterion(logits_flat, labels_flat)
@@ -225,21 +269,62 @@ def evaluate_model(model: nn.Module, validation_loader: DataLoader, device: str 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     return avg_loss
 
+def load_best_model(save_path: str, model_class, device: str = 'cpu'):
+    """Load the best saved model from checkpoint."""
+    checkpoint = torch.load(save_path, map_location=device)
+    
+    # Extract model arguments from saved args
+    args = checkpoint.get('args')
+    if args is None:
+        raise ValueError("Model arguments not found in checkpoint. Cannot reconstruct model.")
+    
+    # Reconstruct model
+    model = model_class(
+        vocab_size=checkpoint.get('vocab_size', args.vocab_size if hasattr(args, 'vocab_size') else None),
+        hidden_dim=args.hidden_dim,
+        key_dim=args.key_dim,
+        value_dim=args.value_dim,
+        output_dim=args.output_dim,
+        num_layers=args.num_layers
+    )
+    
+    # Load model state
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    
+    # Extract other useful information
+    info = {
+        'epoch': checkpoint.get('epoch', 0),
+        'train_loss': checkpoint.get('train_loss', 0),
+        'val_loss': checkpoint.get('val_loss', 0),
+        'best_val_loss': checkpoint.get('best_val_loss', 0),
+        'tokenizer': checkpoint.get('tokenizer'),
+        'args': args
+    }
+    
+    print(f"Loaded model from {save_path}")
+    print(f"  - Epoch: {info['epoch']}")
+    print(f"  - Train Loss: {info['train_loss']:.4f}")
+    print(f"  - Val Loss: {info['val_loss']:.4f}")
+    
+    return model, info
+
 def main():
     parser = argparse.ArgumentParser(description='Train SimpleRNN language model on BSD dataset')
-    parser.add_argument('--debug', action='store_true', help='Use debug mode with limited data')
-    parser.add_argument('--num_debug_samples', type=int, default=128, help='Number of samples in debug mode')
-    parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension')
-    parser.add_argument('--key_dim', type=int, default=32, help='Key dimension')
-    parser.add_argument('--value_dim', type=int, default=64, help='Value dimension')
-    parser.add_argument('--output_dim', type=int, default=128, help='Output dimension')
+    parser.add_argument('--hidden_dim', type=int, default=512, help='Hidden dimension')
+    parser.add_argument('--key_dim', type=int, default=128, help='Key dimension')
+    parser.add_argument('--value_dim', type=int, default=256, help='Value dimension')
+    parser.add_argument('--output_dim', type=int, default=256, help='Output dimension')
     parser.add_argument('--num_layers', type=int, default=2, help='Number of RNN layers')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
-    parser.add_argument('--num_epochs', type=int, default=5, help='Number of training epochs')
+    parser.add_argument('--num_epochs', type=int, default=30, help='Number of training epochs')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--max_length', type=int, default=256, help='Maximum sequence length')
     parser.add_argument('--device', type=str, default='auto', help='Device to use (cpu/cuda/auto)')
     parser.add_argument('--tokenizer_name', type=str, default=None, help='Pretrained tokenizer model name')
+    parser.add_argument('--save_path', type=str, default='best_model.pt', help='Path to save the best model')
+    parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
+    parser.add_argument('--wandb_project', type=str, default='simple-rnn', help='Weights & Biases project name')
     
     args = parser.parse_args()
     
@@ -258,6 +343,9 @@ def main():
     # Create tokenizer
     try:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=True)
+        tokenizer.add_special_tokens({
+            'additional_special_tokens': [EN_TOKEN, JA_TOKEN]
+        })
     except Exception as e:
         print(f"Error loading tokenizer: {e}")
         print("Building tokenizer from scratch...")
@@ -297,19 +385,15 @@ def main():
         validation_loader=validation_loader,
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
-        device=device
+        device=device,
+        save_path=args.save_path,
+        tokenizer=tokenizer,
+        args=args,
+        use_wandb=args.use_wandb,
+        wandb_project=args.wandb_project
     )
     
-    # print("Training completed!")
-    
-    # # Save model
-    # save_path = 'trained_lm_model.pt'
-    # torch.save({
-    #     'model_state_dict': model.state_dict(),
-    #     'tokenizer': dataset.tokenizer,
-    #     'args': args
-    # }, save_path)
-    # print(f"Model saved to {save_path}")
+    print("Training completed!")
 
 
 if __name__ == "__main__":
