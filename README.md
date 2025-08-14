@@ -14,6 +14,8 @@ pip3 install -r requirements.txt
 
 ### Benchmark Scripts
 
+### Pipeline Scripts
+
 ## Key Findings
 
 ### Memory Optimisation #1
@@ -77,10 +79,19 @@ https://www.geeksforgeeks.org/deep-learning/gradient-clipping-in-pytorch-methods
 ### Training Efficiency #4: 
 
 **Issue**
+The model may suffer from overfitting, especially in low-resource settings or with small batch sizes. Without regularization, the model might memorize the training data instead of learning generalizable patterns, leading to poor validation performance.
+
+**Resolution**
+- Dropout: Introduce dropout regularization between RNN layers and within linear projections to prevent overfitting.
+
+### Training Efficiency #5: 
+
+**Issue**
 The model may struggle to capture long-range dependencies.
 
 **Resolution**
 - Luong Attention: Incorporate Luong attention to better handle long dependency relationships in the data.
+- *Note: Not used in benchmarking due to time constraint*
 
 ### Inference Optimisation #1:
 
@@ -94,9 +105,22 @@ The current forward function requires the full sequence at each timestep and onl
 
 ### Memory & Training Efficiency
 
+| Modifications.    | Runtime duration | Peak memory usage | 
+|-------------------|------------------|-------------------|
+| Simple            | 24.1651 seconds  | 20.51 MB          |
+| Fused Projection  |                  |                   |
+
+
+
 ### Inference Efficiency
 
 ### Benchmark Performance
+
+### Demonstrations
+
+#### Rotten Tomato
+
+#### Daily Dialogue
 
 ## Discussions
 
