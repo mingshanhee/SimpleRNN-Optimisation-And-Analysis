@@ -353,12 +353,15 @@ def main():
     if args.dataset_name == 'bsd_ja_en':
         ds = load_dataset("ryo0634/bsd_ja_en")
         ds_cls = BSDTextDataset
+        tokenizer_name = args.tokenizer_name if args.tokenizer_name else "tokenizers/bsd_ja_en_bpe-tokenizer.json"
     elif args.dataset_name == 'dailydialog':
         ds = load_dataset("roskoN/dailydialog")
         ds_cls = DailyDialogDataset
+        tokenizer_name = args.tokenizer_name if args.tokenizer_name else "tokenizers/dailydialog_bpe-tokenizer.json"
     elif args.dataset_name == 'rotten_tomatoes':
         ds = load_dataset("rotten_tomatoes")
         ds_cls = RottenTomatoesDataset
+        tokenizer_name = args.tokenizer_name if args.tokenizer_name else "tokenizers/rotten_tomatoes_bpe-tokenizer.json"
 
     # Create tokenizer
     try:
@@ -369,9 +372,7 @@ def main():
     except Exception as e:
         print(f"Error loading tokenizer: {e}")
         print("Building tokenizer from scratch...")
-        # tokenizer = load_fast_tokenizer(ds, "tokenizers/bsd_ja_en_bpe-tokenizer.json")
-        # tokenizer = load_fast_tokenizer(ds, "tokenizers/dailydialog_bpe-tokenizer.json")
-        tokenizer = load_fast_tokenizer(ds, "tokenizers/rotten_tomatoes_bpe-tokenizer.json")
+        tokenizer = load_fast_tokenizer(ds, tokenizer_name)
 
     # Initialize model
     model = ModifiedLM(
