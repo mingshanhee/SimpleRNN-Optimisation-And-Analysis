@@ -353,6 +353,7 @@ def main():
     parser.add_argument('--luong_score', type=str, default='general', help='Luong attention score type (dot/general)')
     parser.add_argument('--layer_dropout_p', type=float, default=0.1, help='Layer dropout probability')
 
+
     args = parser.parse_args()
     
     # Set device
@@ -396,7 +397,11 @@ def main():
         key_dim=args.key_dim,
         value_dim=args.value_dim,
         output_dim=args.output_dim,
-        num_layers=args.num_layers
+        num_layers=args.num_layers,
+        fused_projection=args.fused_projection,
+        use_luong_attention=args.use_luong_attention,
+        luong_score=args.luong_score,
+        layer_dropout_p=args.layer_dropout_p
     )
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
