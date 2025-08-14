@@ -96,7 +96,8 @@ def train_optimised_model(
     tokenizer = None,
     args = None,
     use_wandb: bool = False,
-    wandb_project: str = 'simple-rnn'
+    wandb_project: str = 'simple-rnn',
+    run_name: str = None
 ):
     """Train the language model and save the best model based on validation loss."""
     print(f"Training on device: {device}")
@@ -105,6 +106,7 @@ def train_optimised_model(
     if use_wandb:
         wandb.init(
             project=wandb_project,
+            name=run_name,
             config={
                 'hidden_dim': args.hidden_dim if args else None,
                 'key_dim': args.key_dim if args else None,
@@ -143,6 +145,10 @@ def train_optimised_model(
         for batch in progress_bar:
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
+            # print(input_ids.shape, labels.shape)
+            # print(validation_loader.dataset.tokenizer.decode(input_ids[0], skip_special_tokens=False))
+            # print(validation_loader.dataset.tokenizer.decode(labels[0], skip_special_tokens=False))
+            # exit()
             
             batch_size, seq_len = input_ids.shape
             
@@ -333,7 +339,7 @@ def main():
     parser.add_argument('--max_length', type=int, default=256, help='Maximum sequence length')
     parser.add_argument('--device', type=str, default='auto', help='Device to use (cpu/cuda/auto)')
     parser.add_argument('--tokenizer_name', type=str, default=None, help='Pretrained tokenizer model name')
-    parser.add_argument('--dataset_name', type=str, required=True, help='Dataset choice', choices=['bsd_ja_en', 'dailydialog', 'rotten_tomatoes'])
+    parser.add_argument('--dataset_name', type=str, required=True, help='Dataset choice', choices=['bsd-ja-en', 'dailydialog', 'rotten-tomatoes'])
     parser.add_argument('--save_path', type=str, default='best_model.pt', help='Path to save the best model')
     parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
     parser.add_argument('--wandb_project', type=str, default='simple-rnn', help='Weights & Biases project name')
@@ -350,18 +356,18 @@ def main():
     print(f"Using device: {device}")
 
     # Load dataset
-    if args.dataset_name == 'bsd_ja_en':
+    if args.dataset_name == 'bsd-ja-en':
         ds = load_dataset("ryo0634/bsd_ja_en")
         ds_cls = BSDTextDataset
-        tokenizer_name = args.tokenizer_name if args.tokenizer_name else "tokenizers/bsd_ja_en_bpe-tokenizer.json"
+        tokenizer_name = args.tokenizer_name if args.tokenizer_name else "tokenizers/bsd-ja-en_bpe-tokenizer.json"
     elif args.dataset_name == 'dailydialog':
         ds = load_dataset("roskoN/dailydialog")
         ds_cls = DailyDialogDataset
         tokenizer_name = args.tokenizer_name if args.tokenizer_name else "tokenizers/dailydialog_bpe-tokenizer.json"
-    elif args.dataset_name == 'rotten_tomatoes':
+    elif args.dataset_name == 'rotten-tomatoes':
         ds = load_dataset("rotten_tomatoes")
         ds_cls = RottenTomatoesDataset
-        tokenizer_name = args.tokenizer_name if args.tokenizer_name else "tokenizers/rotten_tomatoes_bpe-tokenizer.json"
+        tokenizer_name = args.tokenizer_name if args.tokenizer_name else "tokenizers/rotten-tomatoes_bpe-tokenizer.json"
 
     # Create tokenizer
     try:
@@ -413,11 +419,12 @@ def main():
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
         device=device,
-        save_path=args.save_path,
+        save_path=args.save_path.format(params=f"{args.num_layers}layers-{args.hidden_dim}hidden-{args.key_dim}key-{args.value_dim}value"),
         tokenizer=tokenizer,
         args=args,
         use_wandb=args.use_wandb,
-        wandb_project=args.wandb_project
+        wandb_project=f"{args.wandb_project}",
+        run_name=f"{args.dataset_name}_{args.num_layers}layers-{args.hidden_dim}hidden-{args.key_dim}key-{args.value_dim}value" 
     )
     
     print("Training completed!")

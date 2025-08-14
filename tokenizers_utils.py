@@ -16,7 +16,7 @@ def _get_corpus(ds: DatasetDict):
     for split in ["train", "validation", "test"]:
         for ex in ds[split]:
 
-            if "sentence" in ex:
+            if "en_sentence" in ex:
                 yield ex["en_sentence"]
                 yield ex["ja_sentence"]
             

@@ -32,7 +32,7 @@
     },
     {
       "id": 3,
-      "content": "<en>",
+      "content": "<src>",
       "single_word": false,
       "lstrip": false,
       "rstrip": false,
@@ -41,7 +41,7 @@
     },
     {
       "id": 4,
-      "content": "<ja>",
+      "content": "<tgt>",
       "single_word": false,
       "lstrip": false,
       "rstrip": false,
@@ -68,8 +68,8 @@
       "<unk>": 0,
       "</s>": 1,
       "<pad>": 2,
-      "<en>": 3,
-      "<ja>": 4,
+      "<src>": 3,
+      "<tgt>": 4,
       "!": 5,
       "\"": 6,
       "$": 7,
