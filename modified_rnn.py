@@ -58,7 +58,7 @@ class SimpleRNN(nn.Module):
             value_dim: int, 
             output_dim: int,
             fused_projection: bool = True,
-            use_luong_attention: bool = True,
+            use_luong_attention: bool = False,
             luong_score: str = "general",  # 'dot' or 'general'
             layer_dropout_p: float = 0.1,  # inside-layer dropout (timestep and attention context)
         ):
@@ -113,6 +113,7 @@ class SimpleRNN(nn.Module):
 
         # Initialize cell state if not provided
         if cell_state is None:
+            # print("WARNING: cell_state is None, initializing to zeros")
             cell_state = torch.zeros(B, K, V, dtype=dtype, device=device)  # (B, K, V)
         
         # Use list to avoid pre-allocating large tensor
@@ -129,13 +130,16 @@ class SimpleRNN(nn.Module):
                 # Single projection for all components
                 qkgv = self.proj(h_i)
                 query_i, key_i, gate_i, value_i = torch.split(qkgv, [K, K, K, V], dim=-1)
-                key_i  = torch.sigmoid(key_i)
-                gate_i = torch.sigmoid(gate_i)
             else:
-                query_i = self.query_proj(h_i)  # (B, key_dim)
-                key_i = torch.sigmoid(self.key_proj(h_i))  # (B, key_dim)
-                gate_i = torch.sigmoid(self.gate_proj(h_i))  # (B, key_dim)
-                value_i = self.value_proj(h_i)  # (B, value_dim)
+                query_i = self.query_proj(h_i) 
+                key_i = self.key_proj(h_i)  
+                gate_i = self.gate_proj(h_i)  
+                value_i = self.value_proj(h_i)  
+
+            # activations
+            key_i = torch.sigmoid(key_i)  
+            gate_i = torch.sigmoid(gate_i) 
+            value_i = torch.tanh(value_i)  
 
             # Compute key-value update - batch matrix multiplication
             key_value_i = torch.bmm(key_i.unsqueeze(-1), value_i.unsqueeze(1))  # (B, key_dim, value_dim)
@@ -206,9 +210,7 @@ class LM(nn.Module):
         self.inter_layer_dropout = nn.Dropout(inter_layer_dropout_p)
 
         # Final output projection after reduction
-        self.lm_head = nn.Linear(output_dim, vocab_size) #, bias=False)  # Output logits for the vocab_size
-
-        # self.lm_head.weight = self.embedding.weight
+        self.lm_head = nn.Linear(output_dim, vocab_size)
 
     def _forward_layer(self, layer, hidden_state, cell_state):
         return layer(hidden_state, cell_state)
@@ -216,7 +218,7 @@ class LM(nn.Module):
     def forward(
             self, 
             input_ids: torch.Tensor,
-            cell_state: Optional[torch.Tensor] = None
+            cell_states: Optional[torch.Tensor] = None
         ) -> list[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -229,18 +231,21 @@ class LM(nn.Module):
         hidden_state = self.embedding(input_ids)  # (B, T, hidden_dim)
         hidden_state = self.embed_dropout(hidden_state)
 
+        states = []        
         for i, layer in enumerate(self.layers):
             if self.use_gradient_checkpointing and self.training:
-                hidden_state, cell_state = checkpoint(self._forward_layer, layer, hidden_state, cell_state)
+                hidden_state, cell_state = checkpoint(self._forward_layer, layer, hidden_state, cell_states[i] if cell_states is not None else None)
             else:
-                hidden_state, cell_state = layer(hidden_state, cell_state)  # Pass through each SimpleRNN layer
+                hidden_state, cell_state = layer(hidden_state, cell_states[i] if cell_states is not None else None)  # Pass through each SimpleRNN layer
 
             if i < self.num_layers - 1:  # between-layer dropout only
                 hidden_state = self.inter_layer_dropout(hidden_state)
 
+            states.append(cell_state)  # Store cell state for each layer
+
         output = self.lm_head(hidden_state)  # (B, T, vocab_size)
 
-        return output, cell_state
+        return output, torch.stack(states, dim=0)
 
 
 def main():
