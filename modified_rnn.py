@@ -171,7 +171,7 @@ class LM(nn.Module):
         output_dim: int, 
         num_layers: int,
         fused_projection: bool = True,
-        use_luong_attention: bool = True,
+        use_luong_attention: bool = False,
         luong_score: str = "general",  # 'dot' or 'general'
         use_gradient_checkpointing: bool = False,
         embed_dropout_p: float = 0.1,         # 1) embedding dropout

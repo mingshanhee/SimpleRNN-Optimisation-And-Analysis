@@ -6,9 +6,6 @@ Training pipeline for the SimpleRNN language model using the BSD Japanese-Englis
 import argparse
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 from tqdm import tqdm
@@ -20,13 +17,12 @@ from bert_score import score as bert_score
 from modified_rnn import LM as ModifiedLM
 from simple_rnn import LM as SimpleLM
 
-from transformers import AutoTokenizer
 from datasets import load_dataset
 
-from tokenizers_utils import load_fast_tokenizer, TGT_TOKEN
+from tokenizers_utils import TGT_TOKEN
 from data import BSDTextDataset, DailyDialogDataset, RottenTomatoesDataset, collate_fn
 
-from decode_utils import decode
+from decode_utils import simple_inference, modified_inference
 
 def load_best_model(save_path: str, model_class, device: str = 'cpu', vocab_size: int = None):
     """Load the best saved model from checkpoint."""
@@ -51,19 +47,29 @@ def load_best_model(save_path: str, model_class, device: str = 'cpu', vocab_size
                 raise ValueError("Cannot determine vocab_size from checkpoint.")
     
     # Reconstruct model
-    model = model_class(
-        vocab_size=vocab_size,
-        hidden_dim=args.hidden_dim,
-        key_dim=args.key_dim,
-        value_dim=args.value_dim,
-        output_dim=args.output_dim,
-        num_layers=args.num_layers,
-        fused_projection=args.fused_projection,
-        use_luong_attention=args.use_luong_attention,
-        luong_score=args.luong_score,
-        layer_dropout_p=args.layer_dropout_p
-    )
-    
+    if isinstance(model_class, ModifiedLM):
+        model = model_class(
+            vocab_size=vocab_size,
+            hidden_dim=args.hidden_dim,
+            key_dim=args.key_dim,
+            value_dim=args.value_dim,
+            output_dim=args.output_dim,
+            num_layers=args.num_layers,
+            fused_projection=args.fused_projection,
+            use_luong_attention=args.use_luong_attention,
+            luong_score=args.luong_score,
+            layer_dropout_p=args.layer_dropout_p
+        )
+    else:
+        model = model_class(
+            vocab_size=vocab_size,
+            hidden_dim=args.hidden_dim,
+            key_dim=args.key_dim,
+            value_dim=args.value_dim,
+            output_dim=args.output_dim,
+            num_layers=args.num_layers
+        )
+        
     # Load model state
     model.load_state_dict(checkpoint['model_state_dict'])
     model.to(device)
@@ -85,7 +91,7 @@ def load_best_model(save_path: str, model_class, device: str = 'cpu', vocab_size
     
     return model, info
 
-def evaluate_model_metrics(model, dataset_name, test_loader, tokenizer, device='auto', num_samples=100):
+def evaluate_model_metrics(model, model_name, dataset_name, test_loader, tokenizer, device='auto', num_samples=100):
     """Evaluate model on test set with BLEU, ROUGE, and BERTScore metrics."""
     print("Evaluating model with BLEU, ROUGE, and BERTScore metrics...")
     
@@ -104,36 +110,31 @@ def evaluate_model_metrics(model, dataset_name, test_loader, tokenizer, device='
     
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Generating predictions"):
-            # if sample_count >= num_samples:
-            #     break
                 
-            input_ids = batch['input_ids'].to(device)
-            labels = batch['labels'].to(device)
+            input_ids = batch['input_ids'][0].to(device)
+            labels = batch['labels'][0].to(device)
             
             try:
                 # Find the position where target translation starts
-                matches = (input_ids[0] == ja_token_id).nonzero(as_tuple=True)[0]
-                # print(matches)
+                matches = (input_ids == ja_token_id).nonzero(as_tuple=True)[0]
                 ja_pos = matches[0].item()
-                prefix_input = input_ids[0][:ja_pos+1].unsqueeze(0)  # Include the JA token and maintain batch dim
-                reference_translation = labels[0][ja_pos+1:]
+                prefix_input = input_ids[:ja_pos+1]
+                reference_translation = labels[ja_pos+1:]
             except Exception as e:
-                print(f"Error finding JA token: {e}")
-                # Skip if JA token not found
                 continue
             
             # Generate translation
-            # print("Whole sentence:", tokenizer.decode(input_ids[0], skip_special_tokens=False))
-            # print("Prefix inputs:", tokenizer.decode(prefix_input[0], skip_special_tokens=False))
-            # print("Labels:", tokenizer.decode(labels[0], skip_special_tokens=False))
-            generated_ids = decode(
-                model, prefix_input, max_new_tokens=50, eos_token_id=tokenizer.eos_token_id
-            )
+            if model_name == 'simple':
+                generated_ids = simple_inference(
+                    model, prefix_input, max_new_tokens=50, eos_token_id=tokenizer.eos_token_id
+                )
+            else:
+                generated_ids = modified_inference(
+                    model, prefix_input.unsqueeze(0), max_new_tokens=50, eos_token_id=tokenizer.eos_token_id
+                )
             
             # Extract the generated translation part 
             generated_translation = generated_ids[0]
-            # print(f"Generated translation tokens: {generated_translation}")
-            # print(f"Generated translation text: {tokenizer.decode(generated_translation, skip_special_tokens=True)}")
             
             # Remove EOS token if present
             if len(reference_translation) > 0 and reference_translation[-1] == tokenizer.eos_token_id:
@@ -142,10 +143,6 @@ def evaluate_model_metrics(model, dataset_name, test_loader, tokenizer, device='
             # Convert to text
             generated_text = tokenizer.decode(generated_translation, skip_special_tokens=True)
             reference_text = tokenizer.decode(reference_translation, skip_special_tokens=True)
-
-            # print(generated_text)
-            # print(reference_text)
-            # exit()
             
             # Only add if both texts are non-empty
             if generated_text.strip() and reference_text.strip():
@@ -248,6 +245,7 @@ def evaluate_model_metrics(model, dataset_name, test_loader, tokenizer, device='
 
 def evaluate_best_model(
     model_path: str,
+    model_name: str,
     dataset_name: str,
     max_length: int = 256,
     device: str = 'auto',
@@ -286,8 +284,8 @@ def evaluate_best_model(
     tokenizer = checkpoint.get('tokenizer')
 
     # Load the best model
-    model, info = load_best_model(model_path, ModifiedLM, device, len(tokenizer))
-    
+    model, info = load_best_model(model_path, SimpleLM if model_name == 'simple' else ModifiedLM, device, len(tokenizer))
+
     print(f"Model loaded successfully!")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
@@ -305,6 +303,7 @@ def evaluate_best_model(
     # Evaluate model
     evaluate_model_metrics(
         model=model,
+        model_name=model_name,
         dataset_name=dataset_name,
         test_loader=test_loader,
         tokenizer=tokenizer,
@@ -320,6 +319,7 @@ def main():
     parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
     parser.add_argument('--wandb_project', type=str, default='simple-rnn', help='Weights & Biases project name')
     parser.add_argument('--dataset_name', type=str, required=True, help='Dataset name (bsd-ja-en/dailydialog/rotten-tomatoes)', choices=['bsd-ja-en', 'dailydialog', 'rotten-tomatoes'])
+    parser.add_argument('--model_name', type=str, required=True, choices=['simple', 'modified'], help='Model type to use')
     
     # Add evaluation mode arguments
     parser.add_argument('--evaluate', action='store_true', help='Evaluate the best saved model instead of training')
@@ -341,6 +341,7 @@ def main():
     print("Running in evaluation mode...")
     evaluate_best_model(
         model_path=args.model_path,
+        model_name=args.model_name,
         max_length=args.max_length,
         device=device,
         num_samples=args.num_eval_samples,
