@@ -49,6 +49,7 @@ The current forward method in SimpleRNN processes one data point at a time, lead
 **Resolution**:
 - Batch Processing: Enable the model to process multiple sentences in parallel.
 - Dynamic Batch Sizing: Adjust batch sizes according to the longest sequence within each batch to optimise resource usage.
+- Dataloader: Spawn multiple background worker processes to prepare data while the GPU is busy training.
 
 ### Training Efficiency #2
 
