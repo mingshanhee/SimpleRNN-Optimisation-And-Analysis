@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset
-from tokenizers_utils import EN_TOKEN, JA_TOKEN
+from tokenizers_utils import SRC_TOKEN, TGT_TOKEN
 
 class BSDTextDataset(Dataset):
     """Dataset wrapper for BSD Japanese-English corpus."""
@@ -21,8 +21,8 @@ class BSDTextDataset(Dataset):
         src_ids = self.tokenizer.encode(en, add_special_tokens=False)
         tgt_ids = self.tokenizer.encode(ja, add_special_tokens=False)
 
-        src_bos = self.tokenizer.convert_tokens_to_ids(EN_TOKEN)
-        tgt_bos = self.tokenizer.convert_tokens_to_ids(JA_TOKEN)
+        src_bos = self.tokenizer.convert_tokens_to_ids(SRC_TOKEN)
+        tgt_bos = self.tokenizer.convert_tokens_to_ids(TGT_TOKEN)
 
         input_ids = [src_bos] + src_ids + [tgt_bos] + tgt_ids + [
             self.tokenizer.eos_token_id
@@ -51,3 +51,67 @@ def collate_fn(batch, tokenizer):
         'input_ids': input_ids_padded,
         'labels': labels_padded
     }
+
+
+class DailyDialogDataset(Dataset):
+    """Dataset wrapper for Daily Dialog corpus."""
+    
+    def __init__(self, ds_split, tokenizer = None, max_length: int = 512):
+        self.ds = ds_split
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        
+    def __len__(self):
+        return len(self.ds)
+    
+    def __getitem__(self, idx):
+        """Create joint sequence  <en> EN ids <ja> JA ids </s>  for Prefix-LM."""
+        src = self.ds[idx]["utterances"][0] 
+        tgt = self.ds[idx]["utterances"][1]
+
+        src_ids = self.tokenizer.encode(src, add_special_tokens=False)
+        tgt_ids = self.tokenizer.encode(tgt, add_special_tokens=False)
+
+        src_bos = self.tokenizer.convert_tokens_to_ids(SRC_TOKEN)
+        tgt_bos = self.tokenizer.convert_tokens_to_ids(TGT_TOKEN)
+
+        input_ids = [src_bos] + src_ids + [tgt_bos] + tgt_ids + [
+            self.tokenizer.eos_token_id
+        ]
+
+        trans_pos = input_ids.index(tgt_bos) + 1
+        labels = [self.tokenizer.pad_token_id] * trans_pos + input_ids[trans_pos:]
+
+        return {"input_ids": input_ids, "labels": labels}
+    
+
+class RottenTomatoesDataset(Dataset):
+    """Dataset wrapper for Rotten Tomatoes movie reviews."""
+    
+    def __init__(self, ds_split, tokenizer = None, max_length: int = 512):
+        self.ds = ds_split
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        
+    def __len__(self):
+        return len(self.ds)
+    
+    def __getitem__(self, idx):
+        """Create joint sequence  <en> EN ids <ja> JA ids </s>  for Prefix-LM."""
+        src = self.ds[idx]["text"] 
+        tgt = "positive" if self.ds[idx]['label'] == 1 else "negative"
+
+        src_ids = self.tokenizer.encode(src, add_special_tokens=False)
+        tgt_ids = self.tokenizer.encode(tgt, add_special_tokens=False)
+
+        src_bos = self.tokenizer.convert_tokens_to_ids(SRC_TOKEN)
+        tgt_bos = self.tokenizer.convert_tokens_to_ids(TGT_TOKEN)
+
+        input_ids = [src_bos] + src_ids + [tgt_bos] + tgt_ids + [
+            self.tokenizer.eos_token_id
+        ]
+
+        trans_pos = input_ids.index(tgt_bos) + 1
+        labels = [self.tokenizer.pad_token_id] * trans_pos + input_ids[trans_pos:]
+
+        return {"input_ids": input_ids, "labels": labels}
