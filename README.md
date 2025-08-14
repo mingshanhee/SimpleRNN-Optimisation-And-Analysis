@@ -107,8 +107,6 @@ The benchmark is conducted by generating 100 new tokens, starting with a prefix 
 
 ### Benchmark Performance
 
-### Training Demonstrations
-
 The model are only trained for 10 epochs due to the time constraint. 
 
 Note: Looking at the loss, dailydialog dataset still hasn't converged. Can show the wandb plots during interview.
@@ -126,6 +124,10 @@ Note: Looking at the loss, dailydialog dataset still hasn't converged. Can show 
 | -------- | ----------- | ---------- | ---------- | ---------- | ---------- | ------------------- | ---------------- | ------------ |
 | Simple   | 999 / 1000  | 0.0129     | **0.1028** | 0.0163     | **0.0995** | 0.7093              | **0.6837**       | **0.6954**   |
 | Modified | 1000 / 1000 | **0.0132** | 0.1005     | **0.0259** | 0.0987     | **0.7162**          | 0.6709           | 0.6920       |
+
+#### Training Plot (Modified RNN)
+
+![training plot](images/training-plot.png)
 
 ## Discussions
 
