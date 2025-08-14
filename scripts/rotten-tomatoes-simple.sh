@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=7 python3 train.py \
+python3 train.py \
     --dataset_name "rotten-tomatoes" \
     --model_name "simple" \
     --learning_rate 1e-3 \
@@ -11,9 +11,4 @@ CUDA_VISIBLE_DEVICES=7 python3 train.py \
     --num_epochs 20 \
     --save_path "models/rotten-tomatoes/SimpleRNN_{params}.pt" \
     --use_wandb \
-    --fused_projection> /dev/null &
-
-pid1=$!
-
-wait $pid1
-
+    --fused_projection

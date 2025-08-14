@@ -12,29 +12,26 @@ conda create --name SimpleRNN python=3.12
 pip3 install -r requirements.txt
 ```
 
+### Training Scripts
+
+You may find the training scripts within the `scripts` folder. Once you locate the script, run using the following command.
+
+```
+# For example, rotten-tomatoes
+bash scripts/rotten-tomatoes-simple.sh
+```
+
 ### Benchmark Scripts
 
-### Pipeline Scripts
+Run the following scripts
+
+```
+bash benchmark.sh
+```
 
 ## Key Findings
 
-### Memory Optimsation #1
-
-**Issue**
-Frequent layer calls can become costly for long sequences.
-
-**Resolution**:
-- Checkpointing: Introduce a configurable flag to perform gradient checkpointing every K timesteps to reduce memory consumption.
-
 ### Training Optimisation #1
-
-**Issue**
-Per-timestep Python loops store intermediate tensors for each step, increasing memory usage and preventing efficient GPU utilization.
-
-**Resolution**:
-- Vectorized (batched) recurrence computation: Replace the loop with a vectorized prefix-scan formulation that computes all timesteps in parallel using cumulative products and sums, eliminating large intermediate lists and enabling fused GPU operations.
-
-### Training Optimisation #2
 
 **Issue**
 Each timestep involves four separate Linear projection operations, resulting in considerable computational overhead.
@@ -42,7 +39,7 @@ Each timestep involves four separate Linear projection operations, resulting in 
 **Resolution**:
 - Projection Fusion: Combine all projections into a single matrix multiplication, then split the output into query, key, gate, and value components.
 
-### Training Optimisation #3
+### Training Optimisation #2
 
 **Issue**
 The current forward method in SimpleRNN processes one data point at a time, leading to inefficient training.
@@ -51,6 +48,14 @@ The current forward method in SimpleRNN processes one data point at a time, lead
 - Batch Processing: Enable the model to process multiple sentences in parallel.
 - Dynamic Batch Sizing: Adjust batch sizes according to the longest sequence within each batch to optimise resource usage.
 - Dataloader: Spawn multiple background worker processes to prepare data while the GPU is busy training.
+
+### Memory Optimsation #1
+
+**Issue**
+Frequent layer calls can become costly for long sequences.
+
+**Resolution**:
+- Checkpointing: Introduce a configurable flag to perform gradient checkpointing every K timesteps to reduce memory consumption.
 
 ### Inference Optimisation #1:
 
@@ -62,41 +67,87 @@ The current forward function requires the full sequence at each timestep and onl
 
 ## Performance metrics
 
+The models are run with the following settings:
+- vocab_size = 512
+- hidden_dim = 128
+- key_dim = 32
+- value_dim = 64
+- output_dim = 128
+- num_layers = 2
+
 ### Memory & Training Efficiency
 
-| S/N | Modifications.    | Improvement Cat. |Runtime duration | Peak memory usage | 
-|-----|-------------------|------------------|------------------|-------------------|
-| 1| Simple (Batch = 1)  | N/A         | 3.0147 ± 0.0362 seconds  | 20.51 MB          |
-| 2| Fused Projection (Batch = 1)  | Runtime   | 0.0947 ± 0.0514 seconds                  |38.59 MB
-| 3| 2 + Batch Processing (Batch = 32)   | Runtime                 |  0.0271 ± 0.0504 seconds                  | 929.57 MB|
-| 4 | 2 + 3 + Gradient Checkpointing | Memory |  0.0791 ± 0.2113 seconds | 331.82 MB|
+The inputs are as follows:
+```python
+size, seq_length = 256, 512
+x = torch.randint(0, vocab_size, (size, seq_length))
+```
+
+| S/N | Modifications.                   | Improvement Cat. | Runtime duration        | Peak memory usage |
+| --- | -------------------------------- | ---------------- | ----------------------- | ----------------- |
+| 1   | Simple (Batch = 1)               | N/A              | 3.1519 ± 0.0358 seconds | 20.51 ± 0.00 MB   |
+| 2   | Batch Processing (Batch = 32)    | Runtime          | 0.4370 ± 0.0542 seconds | 2565.50 ± 7.36 MB |
+| 4   | 2 + Fused Projection (Batch = 1) | Runtime          | 0.4283 ± 0.0570 seconds | 2565.50 ± 7.36 MB |
+| 3   | 2 + 3 + Gradient Checkpointing   | Memory           | 0.3770 ± 0.2039 seconds | 136.69 ± 0.75 MB  |
 
 ### Inference Efficiency
 
-| S/N | Modifications.    | Improvement Cat. |Runtime duration | Peak memory usage | 
-|-----|-------------------|------------------|------------------|-------------------|
-| 1| Simple (Batch = 1)   | N/A         |               |         |
-| 2| Stepwise Inference (Batch = 1) | Memory   |                  |                   |
+The inputs are as follows:
+```python
+size, seq_length = 1, 256
+x = torch.randint(0, vocab_size, (size, seq_length))
+```
+
+The benchmark is conducted by generating 100 new tokens, starting with a prefix sequence of length 256 tokens.
+
+| S/N | Modifications.                 | Improvement Cat. | Runtime duration        | Peak memory usage |
+| --- | ------------------------------ | ---------------- | ----------------------- | ----------------- |
+| 1   | Simple (Batch = 1)             | N/A              | 5.4187 ± 0.0441 seconds | 24.61 ± 0.00 MB   |
+| 2   | Stepwise Inference (Batch = 1) | Runtime          | 0.2082 ± 0.0430 seconds | 49.74 ± 0.00 MB   |
 
 ### Benchmark Performance
 
-### Demonstrations
+### Training Demonstrations
+
+The model are only trained for 10 epochs due to the time constraint. 
+
+Note: Looking at the loss, dailydialog dataset still hasn't converged. Can show the wandb plots during interview.
 
 #### Rotten Tomato
 
+| Model    | Acc        | F1         |
+| -------- | ---------- | ---------- |
+| Simple   | 0.5146     | 0.4146     |
+| Modified | **0.5807** | **0.5807** |
+
 #### Daily Dialogue
+
+| Model    | Valid       | BLEU       | ROUGE-1    | ROUGE-2    | ROUGE-L    | BERTScore Precision | BERTScore Recall | BERTScore F1 |
+| -------- | ----------- | ---------- | ---------- | ---------- | ---------- | ------------------- | ---------------- | ------------ |
+| Simple   | 999 / 1000  | 0.0129     | **0.1028** | 0.0163     | **0.0995** | 0.7093              | **0.6837**       | **0.6954**   |
+| Modified | 1000 / 1000 | **0.0132** | 0.1005     | **0.0259** | 0.0987     | **0.7162**          | 0.6709           | 0.6920       |
 
 ## Discussions
 
 ### Architecture Comparison
 Compare **Self-Attention** vs **SimpleRNN** in terms of:
-
 - **Computational complexity** (Big-O analysis)  
+  - **SimpleRNN** needs to be sequential as each time step depends on the previous one. Hence, it has a Big-O complexity of **O(T · H²)**, where it is linear in sequence length `T`, quadratic in hidden size `H`. 
+  - **Self-Attention** allows each token to attend to all others simultaneously, enabling full parallelism. Hence, it has a Big-O complexity of **O(T² · H)** — quadratic in sequence length `T`, linear in hidden size `H`.
+
 - **Parallelization potential** 
+  - Both SimpleRNN and Self-Attention support data parallelism, 
+  - However, Self-Attention offers significantly greater scalability in a multi-node, multi-GPU setting. Self-Attention processes all tokens simultaneously without sequential dependencies, allowing efficient use of parallel training strategies. In contrast, SimpleRNNs require step-by-step computation, which limits GPU utilization and slows down training
+
 - **Long-range dependency modeling**  
+  - Self-Attention outperforms SimpleRNN in modeling long-range dependencies by allowing each token to directly access all others, enabling stronger and more explicit global context understanding. In contrast, SimpleRNN processes inputs sequentially, causing earlier information to degrade over time, which limits its ability to capture distant relationships effectively.
 - **Memory scaling** with sequence length  
+  - Self-Attention has a quadratic memory complexity of $O(L^2 \cdot d)$, as it computes interactions between all pairs of tokens, resulting in an attention matrix that grows rapidly with longer sequences. 
+  - SimpleRNN exhibits linear memory complexity of $O(L \cdot d)$, since it processes tokens sequentially and only stores per-step hidden states.
 - **Training characteristics**  
-- *(You may include other relevant factors)*
+  - Gradient Flow and Stability
+    - Self-Attention has direct connections across all positions allow better gradient flow, making it less prone to vanishing or exploding gradients.
+    - SimpleRNN suffers from unstable gradients due to deep temporal recursion, causing training to be numerically unstable for long sequences without gating mechanisms or clipping.
 
 ### Scaling Discussion
 To scale SimpleRNN training across multiple GPUs effectively, we can consider doing the following:
