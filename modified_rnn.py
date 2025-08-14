@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
+import torch.nn.functional as F
 
 # Add gradient checkpointing
 from torch.utils.checkpoint import checkpoint
-
 
 class LuongAttention(nn.Module):
     """
@@ -75,20 +75,17 @@ class SimpleRNN(nn.Module):
             self.proj = nn.Linear(hidden_dim, 3 * key_dim + value_dim)
         else:
             # Separate projection layers for each component
-            self.query_proj = nn.Linear(hidden_dim, key_dim)  # query projection
-            self.key_proj = nn.Linear(hidden_dim, key_dim)  # key projection
-            self.value_proj = nn.Linear(hidden_dim, value_dim)  # value projection
-            self.gate_proj = nn.Linear(hidden_dim, key_dim)  # gate projection
+            self.query_proj = nn.Linear(hidden_dim, key_dim) 
+            self.key_proj = nn.Linear(hidden_dim, key_dim)  
+            self.value_proj = nn.Linear(hidden_dim, value_dim)
+            self.gate_proj = nn.Linear(hidden_dim, key_dim) 
 
-        # self.out_proj = nn.Linear(value_dim, output_dim)  # output projection
-
-        # Attention module (operates in value_dim space)
+        # Attention module
         if self.use_luong_attention:
             self.attn = LuongAttention(dim=value_dim, score=luong_score)
-            # After attention we concatenate [output_i ; context_i] -> 2 * value_dim
             self.out_proj = nn.Linear(2 * value_dim, output_dim)
         else:
-            self.out_proj = nn.Linear(value_dim, output_dim)  # output projection (no attention)
+            self.out_proj = nn.Linear(value_dim, output_dim)  
 
         # one dropout module reused inside the layer
         self.layer_dropout = nn.Dropout(layer_dropout_p)
@@ -111,66 +108,55 @@ class SimpleRNN(nn.Module):
         dtype = hidden_state.dtype
         device = hidden_state.device
 
-        # Initialize cell state if not provided
         if cell_state is None:
-            # print("WARNING: cell_state is None, initializing to zeros")
-            cell_state = torch.zeros(B, K, V, dtype=dtype, device=device)  # (B, K, V)
-        
-        # Use list to avoid pre-allocating large tensor
-        outputs = torch.empty(B, T, self.output_dim if self.use_luong_attention else V,
-                              dtype=dtype, device=device)
-        past_values = []  # list of (B, V)
-        
-        # Process sequence step by step to reduce memory usage
-        for i in range(T):
-            # Compute projections for current timestep
-            h_i = hidden_state[:, i, :]  # (B, hidden_dim)
-            
-            if self.fused_projection:
-                # Single projection for all components
-                qkgv = self.proj(h_i)
-                query_i, key_i, gate_i, value_i = torch.split(qkgv, [K, K, K, V], dim=-1)
+            cell_state = torch.zeros(B, K, V, dtype=dtype, device=device)  
+        C0 = cell_state
+
+        # 1) Project all steps in one matmul
+        if self.fused_projection:
+            qkgv = self.proj(hidden_state)                                 
+            query, key, gate, value = torch.split(qkgv, [K, K, K, V], dim=-1)
+        else:
+            query = self.query_proj(hidden_state)                           
+            key   = self.key_proj(hidden_state)                             
+            gate  = self.gate_proj(hidden_state)                            
+            value = self.value_proj(hidden_state)                           
+
+        # 2) Activations
+        key  = torch.sigmoid(key)                                          
+        gate = torch.sigmoid(gate)                                         
+        value = torch.tanh(value)                                          
+
+        # 3) Vectorized state evolution via scan trick
+        eps = 1e-8
+        P = gate.clamp_min(eps).cumprod(dim=1)                              
+        A = key.unsqueeze(-1) * value.unsqueeze(-2)                         
+        D = (A / P.unsqueeze(-1)).cumsum(dim=1) + C0.unsqueeze(1)           
+        C = P.unsqueeze(-1) * D                                             
+
+        # 4) Outputs for all timesteps
+        output_val = torch.einsum('btkv, btk -> btv', C, query)             
+        output_val = self.layer_dropout(output_val)
+
+        # 5) Luong attention (all at once)
+        if self.use_luong_attention:
+            if self.attn.score == "general":
+                keys_for_scores = self.attn.Wa(output_val)                  
             else:
-                query_i = self.query_proj(h_i) 
-                key_i = self.key_proj(h_i)  
-                gate_i = self.gate_proj(h_i)  
-                value_i = self.value_proj(h_i)  
+                keys_for_scores = output_val
 
-            # activations
-            key_i = torch.sigmoid(key_i)  
-            gate_i = torch.sigmoid(gate_i) 
-            value_i = torch.tanh(value_i)  
+            q = output_val.unsqueeze(1)                                     
+            k = keys_for_scores.unsqueeze(1)                                
+            v = output_val.unsqueeze(1)                                     
+            context = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, is_causal=True                    
+            ).squeeze(1)                                                    
+            context = self.layer_dropout(context)
+            outputs = self.out_proj(torch.cat([output_val, context], dim=-1))  
+        else:
+            outputs = self.out_proj(output_val)                             
 
-            # Compute key-value update - batch matrix multiplication
-            key_value_i = torch.bmm(key_i.unsqueeze(-1), value_i.unsqueeze(1))  # (B, key_dim, value_dim)
-            
-            # Update cell_state (non-in-place to avoid gradient issues)
-            cell_state = cell_state * gate_i.unsqueeze(-1)  
-            cell_state = cell_state + key_value_i 
-            
-            # Compute output for current timestep - batch matrix multiplication
-            output_i_val = torch.bmm(cell_state.transpose(-2, -1), query_i.unsqueeze(-1)).squeeze(-1)  # (B, value_dim)
-            output_i_val = self.layer_dropout(output_i_val)  # inside-layer dropout on timestep output
-
-            if self.use_luong_attention:
-                # Build attention keys from past outputs (causal). Include current step for stability.
-                past_values.append(output_i_val)
-                keys = torch.stack(past_values, dim=1)  # (B, i+1, V)
-                context_i, _ = self.attn(output_i_val, keys)  # (B, V), (B, i+1)
-                context_i = self.layer_dropout(context_i)         # inside-layer dropout on context
-
-                # Concatenate [output_i ; context_i] -> project to output_dim
-                output_i = self.out_proj(torch.cat([output_i_val, context_i], dim=-1))  # (B, output_dim)
-            else:
-                output_i = self.out_proj(output_i_val)  # (B, V)
-                past_values.append(output_i_val)  # still maintain for consistency if needed
-
-            outputs[:, i, :] = output_i
-
-        # # Stack outputs at the end
-        # outputs = self.out_proj(outputs)  # (B, T, output_dim)
-            
-        return outputs, cell_state
+        return outputs, C[:, -1, :, :]                                      
 
 class LM(nn.Module):
     def __init__(
@@ -205,16 +191,16 @@ class LM(nn.Module):
         # Stack of SimpleRNN layers
         self.layers = nn.ModuleList([
             SimpleRNN(
-                hidden_dim, 
+                hidden_dim if i == 0 else output_dim,
                 key_dim, 
                 value_dim, 
-                output_dim, 
+                output_dim,
                 fused_projection, 
                 use_luong_attention=use_luong_attention, 
                 luong_score=luong_score, 
                 layer_dropout_p=layer_dropout_p
             ) 
-            for _ in range(num_layers)
+            for i in range(num_layers)
         ])
 
         # Between-layer dropout (not applied after the last layer)
@@ -277,7 +263,7 @@ def main():
     
     # Test batched input
     batched_input = torch.randint(0, vocab_size, (batch_size, seq_length))
-    batched_output = model(batched_input)
+    batched_output, _ = model(batched_input)
     print(f"Batched input shape: {batched_input.shape}")
     print(f"Batched output shape: {batched_output.shape}")
 
