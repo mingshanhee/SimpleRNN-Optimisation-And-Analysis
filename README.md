@@ -99,7 +99,7 @@ The current forward function requires the full sequence at each timestep and onl
 
 ## Discussions
 
-### 1. Architecture Comparison
+### Architecture Comparison
 Compare **Self-Attention** vs **SimpleRNN** in terms of:
 
 - **Computational complexity** (Big-O analysis)  
@@ -109,8 +109,20 @@ Compare **Self-Attention** vs **SimpleRNN** in terms of:
 - **Training characteristics**  
 - *(You may include other relevant factors)*
 
-### 2. Scaling Discussion
-Analyze and discuss strategies for scaling SimpleRNN training across multiple GPUs.
+### Scaling Discussion
+To scale SimpleRNN training across multiple GPUs effectively, we can consider doing the following:
+
+1. **Data Parallelism**:
+- Use `torch.nn.DistributedDataParallel (DDP)` for efficient and scalable training, as it minimizes overhead compared to `torch.nn.DataParallel`.
+  - DDP split the input batch across GPUs, run forward and backward passes independently, and then synchronize gradients.
+
+2. **Efficient Batch**:
+- Pad sequences within each mini-batch to similar lengths to minimize idle time across GPUs.
+  - Use bucketing to group similar-length sequences, improving computational efficiency.
+
+3. **Model Sharding**:
+- When the model is too large to fit on a single GPU, place different layers (or parts of the model) are placed on different GPUs.
+- *Caveat: SimpleRNNs are typically lightweight; this method adds communication overhead and is less beneficial unless the model is very deep or memory-intensive.*
 
 ## Expected Deliverables
 [] **Optimized SimpleRNN** with documented performance improvements  
