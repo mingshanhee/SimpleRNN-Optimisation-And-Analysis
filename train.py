@@ -21,8 +21,8 @@ from simple_rnn import LM as SimpleLM
 from transformers import AutoTokenizer
 from datasets import load_dataset
 
-from tokenizers_utils import load_fast_tokenizer, EN_TOKEN, JA_TOKEN
-from data import BSDTextDataset, collate_fn
+from tokenizers_utils import load_fast_tokenizer, SRC_TOKEN, TGT_TOKEN
+from data import BSDTextDataset, DailyDialogDataset, RottenTomatoesDataset, collate_fn
 
 def train_model(
     model: nn.Module,
@@ -130,7 +130,7 @@ def train_optimised_model(
     # Track best validation loss and early stopping
     best_val_loss = float('inf')
     best_epoch = 0
-    patience = 5
+    patience = 10
     patience_counter = 0
     
     for epoch in range(num_epochs):
@@ -171,7 +171,7 @@ def train_optimised_model(
             loss.backward()
 
             # Clip gradients to avoid exploding gradients
-            torch.nn.utils.clip_grad_norm(model.parameters(), max_norm=1.0) 
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) 
 
             optimizer.step()
             
@@ -322,17 +322,18 @@ def load_best_model(save_path: str, model_class, device: str = 'cpu'):
 
 def main():
     parser = argparse.ArgumentParser(description='Train SimpleRNN language model on BSD dataset')
-    parser.add_argument('--hidden_dim', type=int, default=128, help='Hidden dimension')
-    parser.add_argument('--key_dim', type=int, default=128, help='Key dimension')
-    parser.add_argument('--value_dim', type=int, default=128, help='Value dimension')
-    parser.add_argument('--output_dim', type=int, default=128, help='Output dimension')
-    parser.add_argument('--num_layers', type=int, default=2, help='Number of RNN layers')
+    parser.add_argument('--hidden_dim', type=int, default=32, help='Hidden dimension')
+    parser.add_argument('--key_dim', type=int, default=32, help='Key dimension')
+    parser.add_argument('--value_dim', type=int, default=32, help='Value dimension')
+    parser.add_argument('--output_dim', type=int, default=32, help='Output dimension')
+    parser.add_argument('--num_layers', type=int, default=1, help='Number of RNN layers')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
-    parser.add_argument('--num_epochs', type=int, default=30, help='Number of training epochs')
+    parser.add_argument('--num_epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--max_length', type=int, default=256, help='Maximum sequence length')
     parser.add_argument('--device', type=str, default='auto', help='Device to use (cpu/cuda/auto)')
     parser.add_argument('--tokenizer_name', type=str, default=None, help='Pretrained tokenizer model name')
+    parser.add_argument('--dataset_name', type=str, required=True, help='Dataset choice', choices=['bsd_ja_en', 'dailydialog', 'rotten_tomatoes'])
     parser.add_argument('--save_path', type=str, default='best_model.pt', help='Path to save the best model')
     parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
     parser.add_argument('--wandb_project', type=str, default='simple-rnn', help='Weights & Biases project name')
@@ -349,18 +350,28 @@ def main():
     print(f"Using device: {device}")
 
     # Load dataset
-    ds = load_dataset("ryo0634/bsd_ja_en")
+    if args.dataset_name == 'bsd_ja_en':
+        ds = load_dataset("ryo0634/bsd_ja_en")
+        ds_cls = BSDTextDataset
+    elif args.dataset_name == 'dailydialog':
+        ds = load_dataset("roskoN/dailydialog")
+        ds_cls = DailyDialogDataset
+    elif args.dataset_name == 'rotten_tomatoes':
+        ds = load_dataset("rotten_tomatoes")
+        ds_cls = RottenTomatoesDataset
 
     # Create tokenizer
     try:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=True)
         tokenizer.add_special_tokens({
-            'additional_special_tokens': [EN_TOKEN, JA_TOKEN]
+            'additional_special_tokens': [SRC_TOKEN, TGT_TOKEN]
         })
     except Exception as e:
         print(f"Error loading tokenizer: {e}")
         print("Building tokenizer from scratch...")
-        tokenizer = load_fast_tokenizer(ds, "tokenizers/bsd_ja_en_bpe-tokenizer.json")
+        # tokenizer = load_fast_tokenizer(ds, "tokenizers/bsd_ja_en_bpe-tokenizer.json")
+        # tokenizer = load_fast_tokenizer(ds, "tokenizers/dailydialog_bpe-tokenizer.json")
+        tokenizer = load_fast_tokenizer(ds, "tokenizers/rotten_tomatoes_bpe-tokenizer.json")
 
     # Initialize model
     model = ModifiedLM(
@@ -375,7 +386,7 @@ def main():
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Create dataset and dataloader
-    train_ds = BSDTextDataset(ds['train'], tokenizer, max_length=args.max_length)
+    train_ds = ds_cls(ds['train'], tokenizer, max_length=args.max_length)
     train_loader = DataLoader(
         train_ds, 
         batch_size=args.batch_size, 
@@ -384,7 +395,7 @@ def main():
         pin_memory=True,
         num_workers=4
     )
-    validation_ds = BSDTextDataset(ds['validation'], tokenizer, max_length=args.max_length)
+    validation_ds = ds_cls(ds['validation'], tokenizer, max_length=args.max_length)
     validation_loader = DataLoader(
         validation_ds, 
         batch_size=args.batch_size,

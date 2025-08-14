@@ -8,15 +8,28 @@ from tokenizers.trainers import BpeTrainer
 from datasets import DatasetDict
 from transformers import PreTrainedTokenizerFast
 
-EN_TOKEN = "<en>"
-JA_TOKEN = "<ja>"
-LANG_TOKENS = [EN_TOKEN, JA_TOKEN]
+SRC_TOKEN = "<src>"
+TGT_TOKEN = "<tgt>"
+LANG_TOKENS = [SRC_TOKEN, TGT_TOKEN]
 
 def _get_corpus(ds: DatasetDict):
     for split in ["train", "validation", "test"]:
         for ex in ds[split]:
-            yield ex["en_sentence"]
-            yield ex["ja_sentence"]
+
+            if "sentence" in ex:
+                yield ex["en_sentence"]
+                yield ex["ja_sentence"]
+            
+            if "utterances" in ex:
+                yield ex["utterances"][0]
+                yield ex["utterances"][1]
+
+            if "text" in ex:
+                yield ex['text']
+    
+    if "text" in ex:
+        yield "positive"
+        yield "negative"
 
 def _train_and_save_tokenizer(ds: DatasetDict, tokenizer_name: str):
     tokenizer = Tokenizer(BPE(unk_token="<unk>"))
