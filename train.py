@@ -302,7 +302,11 @@ def load_best_model(save_path: str, model_class, device: str = 'cpu'):
         key_dim=args.key_dim,
         value_dim=args.value_dim,
         output_dim=args.output_dim,
-        num_layers=args.num_layers
+        num_layers=args.num_layers,
+        fused_projection=args.fused_projection,
+        use_luong_attention=args.use_luong_attention,
+        luong_score=args.luong_score,
+        layer_dropout_p=args.layer_dropout_p
     )
     
     # Load model state
@@ -343,7 +347,12 @@ def main():
     parser.add_argument('--save_path', type=str, default='best_model.pt', help='Path to save the best model')
     parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
     parser.add_argument('--wandb_project', type=str, default='simple-rnn', help='Weights & Biases project name')
-    
+
+    parser.add_argument('--fused_projection', action='store_true', help='Use fused projection for efficiency')
+    parser.add_argument('--use_luong_attention', action='store_true', help='Use Luong attention mechanism')
+    parser.add_argument('--luong_score', type=str, default='general', help='Luong attention score type (dot/general)')
+    parser.add_argument('--layer_dropout_p', type=float, default=0.1, help='Layer dropout probability')
+
     args = parser.parse_args()
     
     # Set device

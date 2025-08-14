@@ -57,10 +57,10 @@ class SimpleRNN(nn.Module):
             key_dim: int, 
             value_dim: int, 
             output_dim: int,
-            fused_projection: bool = True,
-            use_luong_attention: bool = False,
-            luong_score: str = "general",  # 'dot' or 'general'
-            layer_dropout_p: float = 0.1,  # inside-layer dropout (timestep and attention context)
+            fused_projection,
+            use_luong_attention,
+            luong_score,  # 'dot' or 'general'
+            layer_dropout_p,  # inside-layer dropout (timestep and attention context)
         ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -182,6 +182,8 @@ class LM(nn.Module):
         output_dim: int, 
         num_layers: int,
         fused_projection: bool = True,
+        use_luong_attention: bool = True,
+        luong_score: str = "general",  # 'dot' or 'general'
         use_gradient_checkpointing: bool = False,
         embed_dropout_p: float = 0.1,         # 1) embedding dropout
         layer_dropout_p: float = 0.1,         # 2) inside-layer dropout (per SimpleRNN)
@@ -202,7 +204,16 @@ class LM(nn.Module):
 
         # Stack of SimpleRNN layers
         self.layers = nn.ModuleList([
-            SimpleRNN(hidden_dim, key_dim, value_dim, output_dim, fused_projection, layer_dropout_p=layer_dropout_p) 
+            SimpleRNN(
+                hidden_dim, 
+                key_dim, 
+                value_dim, 
+                output_dim, 
+                fused_projection, 
+                use_luong_attention=use_luong_attention, 
+                luong_score=luong_score, 
+                layer_dropout_p=layer_dropout_p
+            ) 
             for _ in range(num_layers)
         ])
 

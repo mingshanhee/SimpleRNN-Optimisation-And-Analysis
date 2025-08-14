@@ -57,7 +57,11 @@ def load_best_model(save_path: str, model_class, device: str = 'cpu', vocab_size
         key_dim=args.key_dim,
         value_dim=args.value_dim,
         output_dim=args.output_dim,
-        num_layers=args.num_layers
+        num_layers=args.num_layers,
+        fused_projection=args.fused_projection,
+        use_luong_attention=args.use_luong_attention,
+        luong_score=args.luong_score,
+        layer_dropout_p=args.layer_dropout_p
     )
     
     # Load model state
@@ -109,7 +113,7 @@ def evaluate_model_metrics(model, dataset_name, test_loader, tokenizer, device='
             try:
                 # Find the position where target translation starts
                 matches = (input_ids[0] == ja_token_id).nonzero(as_tuple=True)[0]
-                print(matches)
+                # print(matches)
                 ja_pos = matches[0].item()
                 prefix_input = input_ids[0][:ja_pos+1].unsqueeze(0)  # Include the JA token and maintain batch dim
                 reference_translation = labels[0][ja_pos+1:]
@@ -120,8 +124,8 @@ def evaluate_model_metrics(model, dataset_name, test_loader, tokenizer, device='
             
             # Generate translation
             # print("Whole sentence:", tokenizer.decode(input_ids[0], skip_special_tokens=False))
-            print("Prefix inputs:", tokenizer.decode(prefix_input[0], skip_special_tokens=False))
-            print("Labels:", tokenizer.decode(labels[0], skip_special_tokens=False))
+            # print("Prefix inputs:", tokenizer.decode(prefix_input[0], skip_special_tokens=False))
+            # print("Labels:", tokenizer.decode(labels[0], skip_special_tokens=False))
             generated_ids = decode(
                 model, prefix_input, max_new_tokens=50, eos_token_id=tokenizer.eos_token_id
             )
@@ -139,9 +143,9 @@ def evaluate_model_metrics(model, dataset_name, test_loader, tokenizer, device='
             generated_text = tokenizer.decode(generated_translation, skip_special_tokens=True)
             reference_text = tokenizer.decode(reference_translation, skip_special_tokens=True)
 
-            print(generated_text)
-            print(reference_text)
-            exit()
+            # print(generated_text)
+            # print(reference_text)
+            # exit()
             
             # Only add if both texts are non-empty
             if generated_text.strip() and reference_text.strip():
