@@ -73,6 +73,7 @@ class SimpleRNN(nn.Module):
         if fused_projection:
             # Single projection layer for all components
             self.proj = nn.Linear(hidden_dim, 3 * key_dim + value_dim)
+            torch.nn.init.xavier_uniform_(self.proj.weight)
         else:
             # Separate projection layers for each component
             self.query_proj = nn.Linear(hidden_dim, key_dim) 
@@ -84,8 +85,10 @@ class SimpleRNN(nn.Module):
         if self.use_luong_attention:
             self.attn = LuongAttention(dim=value_dim, score=luong_score)
             self.out_proj = nn.Linear(2 * value_dim, output_dim)
+            torch.nn.init.xavier_uniform_(self.proj.weight)
         else:
             self.out_proj = nn.Linear(value_dim, output_dim)  
+            torch.nn.init.xavier_uniform_(self.proj.weight)
 
         # one dropout module reused inside the layer
         self.layer_dropout = nn.Dropout(layer_dropout_p)
@@ -125,38 +128,38 @@ class SimpleRNN(nn.Module):
         # 2) Activations
         key  = torch.sigmoid(key)                                          
         gate = torch.sigmoid(gate)                                         
-        value = torch.tanh(value)                                          
+        value = torch.tanh(value)     
 
-        # 3) Vectorized state evolution via scan trick
-        eps = 1e-8
-        P = gate.clamp_min(eps).cumprod(dim=1)                              
-        A = key.unsqueeze(-1) * value.unsqueeze(-2)                         
-        D = (A / P.unsqueeze(-1)).cumsum(dim=1) + C0.unsqueeze(1)           
-        C = P.unsqueeze(-1) * D                                             
+        # Vectorized key ⊗ value outer product: (B, T, K, V)
+        key_value = key.unsqueeze(-1) * value.unsqueeze(-2)
 
-        # 4) Outputs for all timesteps
-        output_val = torch.einsum('btkv, btk -> btv', C, query)             
-        output_val = self.layer_dropout(output_val)
+        outputs = []
+        past_values = []
 
-        # 5) Luong attention (all at once)
-        if self.use_luong_attention:
-            if self.attn.score == "general":
-                keys_for_scores = self.attn.Wa(output_val)                  
+        for t in range(T):
+            # Recurrent update
+            cell_state = cell_state * gate[:, t].unsqueeze(-1) + key_value[:, t]
+
+            # (B, K, V) x (B, K, 1) -> (B, V)
+            query_t = query[:, t].unsqueeze(-1)
+            output_val_t = torch.bmm(cell_state.transpose(1, 2), query_t).squeeze(-1)
+            output_val_t = self.layer_dropout(output_val_t)
+
+            if self.use_luong_attention:
+                past_values.append(output_val_t)
+                keys = torch.stack(past_values, dim=1)  # (B, t+1, V)
+                context_t, _ = self.attn(output_val_t, keys)  # (B, V)
+                context_t = self.layer_dropout(context_t)
+                output_t = self.out_proj(torch.cat([output_val_t, context_t], dim=-1))
             else:
-                keys_for_scores = output_val
+                output_t = self.out_proj(output_val_t)
 
-            q = output_val.unsqueeze(1)                                     
-            k = keys_for_scores.unsqueeze(1)                                
-            v = output_val.unsqueeze(1)                                     
-            context = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=None, is_causal=True                    
-            ).squeeze(1)                                                    
-            context = self.layer_dropout(context)
-            outputs = self.out_proj(torch.cat([output_val, context], dim=-1))  
-        else:
-            outputs = self.out_proj(output_val)                             
+            outputs.append(output_t)
 
-        return outputs, C[:, -1, :, :]                                      
+        # Stack all outputs: (B, T, output_dim)
+        outputs = torch.stack(outputs, dim=1)
+
+        return outputs, cell_state                                
 
 class LM(nn.Module):
     def __init__(

@@ -26,67 +26,7 @@ from data import BSDTextDataset, DailyDialogDataset, RottenTomatoesDataset, coll
 
 def train_model(
     model: nn.Module,
-    train_loader: DataLoader,
-    num_epochs: int = 5,
-    learning_rate: float = 1e-3,
-    device: str = 'cpu'
-):
-    """Train the language model."""
-    print(f"Training on device: {device}")
-    
-    model = model.to(device)
-    model.train()
-    
-    # use cosine annealing learning rate scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-    criterion = nn.CrossEntropyLoss(ignore_index=train_loader.dataset.tokenizer.pad_token_id)  # Ignore padding tokens
-    
-    for epoch in range(num_epochs):
-        total_loss = 0.0
-        num_batches = 0
-        
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
-        
-        for batch in progress_bar:
-            input_ids = batch['input_ids'].to(device)
-            labels = batch['labels'].to(device)
-            
-            batch_size, seq_len = input_ids.shape
-            
-            # Process each sequence in the batch separately (since model expects 1D input)
-            batch_loss = 0.0
-            
-            for i in range(batch_size):
-                optimizer.zero_grad()
-                
-                # Get predictions for this sequence
-                logits = model(input_ids[i])  # (seq_len, vocab_size)
-                
-                # Compute loss
-                loss = criterion(logits, labels[i])
-                
-                # Backward pass
-                loss.backward()
-
-                # Clip gradients to avoid exploding gradients
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-                optimizer.step()
-                
-                batch_loss += loss.item()
-            
-            avg_batch_loss = batch_loss / batch_size
-            total_loss += avg_batch_loss
-            num_batches += 1
-            
-            progress_bar.set_postfix({'loss': f'{avg_batch_loss:.4f}'})
-        
-        avg_epoch_loss = total_loss / num_batches
-        print(f"Epoch {epoch+1} - Average Loss: {avg_epoch_loss:.4f}")
-
-
-def train_optimised_model(
-    model: nn.Module,
+    model_name: str,
     train_loader: DataLoader,
     validation_loader: DataLoader = None,
     num_epochs: int = 5,
@@ -132,67 +72,101 @@ def train_optimised_model(
     # Track best validation loss and early stopping
     best_val_loss = float('inf')
     best_epoch = 0
-    patience = 10
+    patience = 5
     patience_counter = 0
     
     for epoch in range(num_epochs):
         total_loss = 0.0
         num_batches = 0
-        printed = False
         
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
         
         for batch in progress_bar:
-            input_ids = batch['input_ids'].to(device)
-            labels = batch['labels'].to(device)
-            # print(input_ids.shape, labels.shape)
-            # print(validation_loader.dataset.tokenizer.decode(input_ids[0], skip_special_tokens=False))
-            # print(validation_loader.dataset.tokenizer.decode(labels[0], skip_special_tokens=False))
-            # exit()
-            
-            batch_size, seq_len = input_ids.shape
-            
-            # Process each sequence in the batch separately (since model expects 1D input)
-            batch_loss = 0.0
-            
-            optimizer.zero_grad()
-            
-            # Get predictions for this sequence
-            logits, _ = model(input_ids)  # (batch_size, seq_len, vocab_size)
-            
-            # Reshape for CrossEntropyLoss
-            batch_size, seq_len, vocab_size = logits.shape
-            # Shift logits and labels for next-token prediction
-            # logits[:-1] predicts labels[1:]
-            logits_shifted = logits[:, :-1, :].contiguous()  # (batch_size, seq_len-1, vocab_size)
-            labels_shifted = labels[:, 1:].contiguous()  # (batch_size, seq_len-1)
-            
-            logits_flat = logits_shifted.view(-1, vocab_size)  # (batch_size * (seq_len-1), vocab_size)
-            labels_flat = labels_shifted.view(-1)  # (batch_size * (seq_len-1),)
-            
-            # Compute loss
-            loss = criterion(logits_flat, labels_flat)
+            if args.model_name == 'simple':
+                input_ids = batch['input_ids'].squeeze(0).to(device) # (seq_len)
+                labels = batch['labels'].squeeze(0).to(device) # (seq_len)
                 
-            # Backward pass
-            loss.backward()
+                # Process each sequence in the batch separately (since model expects 1D input)
+                batch_loss = 0.0
+                
+                optimizer.zero_grad()
+                
+                # Get predictions for this sequence
+                logits = model(input_ids) 
+                
+                # Reshape for CrossEntropyLoss
+                _, vocab_size = logits.shape # (seq_len, vocab_size)
 
-            # Clip gradients to avoid exploding gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) 
+                # Shift logits and labels for next-token prediction
+                logits_shifted = logits[:-1, :].contiguous()  # (seq_len-1, vocab_size)
+                labels_shifted = labels[1:].contiguous()  # (seq_len-1,)
+                
+                logits_flat = logits_shifted.view(-1, vocab_size)  # (seq_len-1, vocab_size)
+                labels_flat = labels_shifted.view(-1)  # (seq_len-1,)
+                
+                # Compute loss
+                loss = criterion(logits_flat, labels_flat)
+                    
+                # Backward pass
+                loss.backward()
 
-            optimizer.step()
-            
-            batch_loss += loss.item()
-            
-            avg_batch_loss = batch_loss / batch_size
-            total_loss += avg_batch_loss
-            num_batches += 1
-            
-            progress_bar.set_postfix({'loss': f'{avg_batch_loss:.4f}'})
+                # Clip gradients to avoid exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) 
+
+                optimizer.step()
+                
+                total_loss += loss.item()
+                num_batches += 1
+                
+                progress_bar.set_postfix({'loss': f'{batch_loss:.4f}'})
+
+            else:
+                input_ids = batch['input_ids'].to(device)
+                labels = batch['labels'].to(device)
+                
+                batch_size, seq_len = input_ids.shape
+                
+                # Process each sequence in the batch separately (since model expects 1D input)
+                batch_loss = 0.0
+                
+                optimizer.zero_grad()
+                
+                # Get predictions for this sequence
+                logits, _ = model(input_ids)  # (batch_size, seq_len, vocab_size)
+                
+                # Reshape for CrossEntropyLoss
+                batch_size, seq_len, vocab_size = logits.shape
+                # Shift logits and labels for next-token prediction
+                # logits[:-1] predicts labels[1:]
+                logits_shifted = logits[:, :-1, :].contiguous()  # (batch_size, seq_len-1, vocab_size)
+                labels_shifted = labels[:, 1:].contiguous()  # (batch_size, seq_len-1)
+                
+                logits_flat = logits_shifted.view(-1, vocab_size)  # (batch_size * (seq_len-1), vocab_size)
+                labels_flat = labels_shifted.view(-1)  # (batch_size * (seq_len-1),)
+                
+                # Compute loss
+                loss = criterion(logits_flat, labels_flat)
+                    
+                # Backward pass
+                loss.backward()
+
+                # Clip gradients to avoid exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) 
+
+                optimizer.step()
+                
+                batch_loss += loss.item()
+                
+                avg_batch_loss = batch_loss / batch_size
+                total_loss += avg_batch_loss
+                num_batches += 1
+                
+                progress_bar.set_postfix({'loss': f'{avg_batch_loss:.4f}'})
         
         avg_epoch_loss = total_loss / num_batches
         
         # Evaluate on validation set if provided
-        val_loss = evaluate_model(model, validation_loader, device)
+        val_loss = evaluate_model(model, model_name, validation_loader, device)
         print(f"Epoch {epoch+1} - Train Loss: {avg_epoch_loss:.4f}, Val Loss: {val_loss:.4f}")
         
         # Log to wandb if enabled
@@ -250,7 +224,7 @@ def train_optimised_model(
     print(f"Best validation loss: {best_val_loss:.4f} (Epoch {best_epoch})")
     print(f"Best model saved to: {save_path}")
 
-def evaluate_model(model: nn.Module, validation_loader: DataLoader, device: str = 'cpu'):
+def evaluate_model(model: nn.Module, model_name: str, validation_loader: DataLoader, device: str = 'cpu'):
     """Evaluate the model on validation data."""
     model.eval()
     total_loss = 0.0
@@ -260,79 +234,61 @@ def evaluate_model(model: nn.Module, validation_loader: DataLoader, device: str 
     
     with torch.no_grad():
         for batch in validation_loader:
-            input_ids = batch['input_ids'].to(device)
-            labels = batch['labels'].to(device)
-            
-            # Get predictions
-            logits, _ = model(input_ids)  # (batch_size, seq_len, vocab_size)
-            
-            # Reshape for CrossEntropyLoss
-            batch_size, seq_len, vocab_size = logits.shape
-            # Shift logits and labels for next-token prediction
-            # logits[:-1] predicts labels[1:]
-            logits_shifted = logits[:, :-1, :].contiguous()  # (batch_size, seq_len-1, vocab_size)
-            labels_shifted = labels[:, 1:].contiguous()  # (batch_size, seq_len-1)
-            
-            logits_flat = logits_shifted.view(-1, vocab_size)
-            labels_flat = labels_shifted.view(-1)
-            
-            # Compute loss
-            loss = criterion(logits_flat, labels_flat)
 
-            avg_batch_loss = loss.item() / batch_size
-            total_loss += avg_batch_loss
-            num_batches += 1
+            if model_name == 'simple':
+                input_ids = batch['input_ids'].squeeze(0).to(device) # (seq_len)
+                labels = batch['labels'].squeeze(0).to(device) # (seq_len)
+                
+                # Get predictions for this sequence
+                logits = model(input_ids) 
+                
+                # Reshape for CrossEntropyLoss
+                _, vocab_size = logits.shape # (seq_len, vocab_size)
+
+                # Shift logits and labels for next-token prediction
+                logits_shifted = logits[:-1, :].contiguous()  # (seq_len-1, vocab_size)
+                labels_shifted = labels[1:].contiguous()  # (seq_len-1,)
+                
+                logits_flat = logits_shifted.view(-1, vocab_size)  # (seq_len-1, vocab_size)
+                labels_flat = labels_shifted.view(-1)  # (seq_len-1,)
+                
+                # Compute loss
+                loss = criterion(logits_flat, labels_flat)
+
+                total_loss += loss.item()
+                num_batches += 1
+
+            else:
+                input_ids = batch['input_ids'].to(device)
+                labels = batch['labels'].to(device)
+                
+                # Get predictions
+                logits, _ = model(input_ids)  # (batch_size, seq_len, vocab_size)
+                
+                # Reshape for CrossEntropyLoss
+                batch_size, seq_len, vocab_size = logits.shape
+                # Shift logits and labels for next-token prediction
+                # logits[:-1] predicts labels[1:]
+                logits_shifted = logits[:, :-1, :].contiguous()  # (batch_size, seq_len-1, vocab_size)
+                labels_shifted = labels[:, 1:].contiguous()  # (batch_size, seq_len-1)
+                
+                logits_flat = logits_shifted.view(-1, vocab_size)
+                labels_flat = labels_shifted.view(-1)
+                
+                # Compute loss
+                loss = criterion(logits_flat, labels_flat)
+
+                avg_batch_loss = loss.item() / batch_size
+                total_loss += avg_batch_loss
+                num_batches += 1
     
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     return avg_loss
 
-def load_best_model(save_path: str, model_class, device: str = 'cpu'):
-    """Load the best saved model from checkpoint."""
-    checkpoint = torch.load(save_path, map_location=device)
-    
-    # Extract model arguments from saved args
-    args = checkpoint.get('args')
-    if args is None:
-        raise ValueError("Model arguments not found in checkpoint. Cannot reconstruct model.")
-    
-    # Reconstruct model
-    model = model_class(
-        vocab_size=checkpoint.get('vocab_size', args.vocab_size if hasattr(args, 'vocab_size') else None),
-        hidden_dim=args.hidden_dim,
-        key_dim=args.key_dim,
-        value_dim=args.value_dim,
-        output_dim=args.output_dim,
-        num_layers=args.num_layers,
-        fused_projection=args.fused_projection,
-        use_luong_attention=args.use_luong_attention,
-        luong_score=args.luong_score,
-        layer_dropout_p=args.layer_dropout_p
-    )
-    
-    # Load model state
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.to(device)
-    
-    # Extract other useful information
-    info = {
-        'epoch': checkpoint.get('epoch', 0),
-        'train_loss': checkpoint.get('train_loss', 0),
-        'val_loss': checkpoint.get('val_loss', 0),
-        'best_val_loss': checkpoint.get('best_val_loss', 0),
-        'tokenizer': checkpoint.get('tokenizer'),
-        'args': args
-    }
-    
-    print(f"Loaded model from {save_path}")
-    print(f"  - Epoch: {info['epoch']}")
-    print(f"  - Train Loss: {info['train_loss']:.4f}")
-    print(f"  - Val Loss: {info['val_loss']:.4f}")
-    
-    return model, info
-
 def main():
     parser = argparse.ArgumentParser(description='Train SimpleRNN language model on BSD dataset')
     parser.add_argument('--hidden_dim', type=int, default=32, help='Hidden dimension')
+    parser.add_argument('--model_name', type=str, required=True, choices=['simple', 'modified'], help='Model type to use')
     parser.add_argument('--key_dim', type=int, default=32, help='Key dimension')
     parser.add_argument('--value_dim', type=int, default=32, help='Value dimension')
     parser.add_argument('--output_dim', type=int, default=32, help='Output dimension')
@@ -353,7 +309,6 @@ def main():
     parser.add_argument('--luong_score', type=str, default='general', help='Luong attention score type (dot/general)')
     parser.add_argument('--layer_dropout_p', type=float, default=0.1, help='Layer dropout probability')
 
-
     args = parser.parse_args()
     
     # Set device
@@ -364,6 +319,11 @@ def main():
     
     print(f"Arguments: {args}")
     print(f"Using device: {device}")
+
+    # assert args.model_name == "simple" and args.batch_size == 1, "Only simple model with batch size 1 is supported for now."
+    if args.model_name == "simple":
+        print("Using SimpleRNN model with batch size 1 for training.")
+        args.batch_size = 1
 
     # Load dataset
     if args.dataset_name == 'bsd-ja-en':
@@ -391,18 +351,28 @@ def main():
         tokenizer = load_fast_tokenizer(ds, tokenizer_name)
 
     # Initialize model
-    model = ModifiedLM(
-        vocab_size=len(tokenizer),
-        hidden_dim=args.hidden_dim,
-        key_dim=args.key_dim,
-        value_dim=args.value_dim,
-        output_dim=args.output_dim,
-        num_layers=args.num_layers,
-        fused_projection=args.fused_projection,
-        use_luong_attention=args.use_luong_attention,
-        luong_score=args.luong_score,
-        layer_dropout_p=args.layer_dropout_p
-    )
+    if args.model_name == 'simple':
+        model = SimpleLM(
+            vocab_size=len(tokenizer),
+            hidden_dim=args.hidden_dim,
+            key_dim=args.key_dim,
+            value_dim=args.value_dim,
+            output_dim=args.output_dim,
+            num_layers=args.num_layers
+        )
+    elif args.model_name == 'modified':
+        model = ModifiedLM(
+            vocab_size=len(tokenizer),
+            hidden_dim=args.hidden_dim,
+            key_dim=args.key_dim,
+            value_dim=args.value_dim,
+            output_dim=args.output_dim,
+            num_layers=args.num_layers,
+            fused_projection=args.fused_projection,
+            use_luong_attention=args.use_luong_attention,
+            luong_score=args.luong_score,
+            layer_dropout_p=args.layer_dropout_p
+        )
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
@@ -416,6 +386,7 @@ def main():
         pin_memory=True,
         num_workers=4
     )
+
     validation_ds = ds_cls(ds['validation'], tokenizer, max_length=args.max_length)
     validation_loader = DataLoader(
         validation_ds, 
@@ -426,8 +397,9 @@ def main():
     )
     
     # Train model
-    train_optimised_model(
+    train_model(
         model=model,
+        model_name=args.model_name,
         train_loader=train_loader,
         validation_loader=validation_loader,
         num_epochs=args.num_epochs,
@@ -437,7 +409,7 @@ def main():
         tokenizer=tokenizer,
         args=args,
         use_wandb=args.use_wandb,
-        wandb_project=f"{args.wandb_project}",
+        wandb_project=args.model_name,
         run_name=f"{args.dataset_name}_{args.num_layers}layers-{args.hidden_dim}hidden-{args.key_dim}key-{args.value_dim}value" 
     )
     
